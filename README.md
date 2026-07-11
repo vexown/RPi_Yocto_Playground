@@ -12,8 +12,22 @@ identical; syntax differences are noted in `notes/` as they come up.
 - This repo: configs, custom layers, scripts, notes — the stuff worth tracking.
 - `/media/blankmcu/EmbeddedLinux/yocto/`: poky, meta-raspberrypi, downloads,
   sstate-cache, build dirs — the heavy regenerable stuff (~100+ GB).
-  That disk is a loop-mounted ext4 image; mount it first with
-  `mount_linux_filesystem.sh` from the exFAT drive.
+
+### The build disk
+
+Yocto refuses to build on exFAT/NTFS/tmpfs — it needs a POSIX filesystem
+(hardlinks, xattrs, case sensitivity). Our big external drive is exFAT, so
+the builds live inside a 250 GB **ext4 image file** on that drive,
+loop-mounted at `/media/blankmcu/EmbeddedLinux`:
+
+```bash
+./scripts/mount-build-disk.sh create 250   # one-time: create + format the image
+./scripts/mount-build-disk.sh              # every session: mount it
+```
+
+(The image predates this repo — it was originally made the same way the
+create command does it: zero-filled file + `mkfs.ext4` on it, no partition
+table. The script is the reproducible replacement for that manual step.)
 
 ## One-time host setup (new machine)
 

@@ -12,7 +12,7 @@ RELEASE="scarthgap"
 # The build disk is a loop-mounted ext4 image — refuse to run without it.
 if ! mountpoint -q "$YOCTO_DISK"; then
     echo "ERROR: $YOCTO_DISK is not mounted."
-    echo "Run mount_linux_filesystem.sh from the exFAT drive first."
+    echo "Run ./scripts/mount-build-disk.sh first."
     return 1 2>/dev/null || exit 1
 fi
 
