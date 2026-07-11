@@ -36,12 +36,16 @@ case "$DEVICE" in
     /dev/nvme*) echo "ERROR: $DEVICE is an NVMe disk — refusing."; exit 1 ;;
     /dev/sda)   echo "ERROR: /dev/sda is the internal SATA SSD — refusing."; exit 1 ;;
 esac
-# Refuse if any partition of the target is mounted (e.g. auto-mounted by the
-# desktop). Unmount first so we don't write under a live filesystem.
-if lsblk -no MOUNTPOINT "$DEVICE" | grep -q .; then
-    echo "ERROR: $DEVICE has mounted partitions:"
-    lsblk "$DEVICE"
-    echo "Unmount them first (e.g. udisksctl unmount -b ${DEVICE}1)."
+# Refuse if any partition of the target is mounted. The desktop auto-mounts
+# removable cards on insert, so this fires on almost every reflash.
+# Note: unmounting is per-PARTITION (/dev/sdc1), never the whole disk
+# (/dev/sdc) — a disk itself is not a mountable filesystem.
+MOUNTED_PARTS=$(lsblk -lno NAME,MOUNTPOINT "$DEVICE" | awk '$2 != "" {print $1}')
+if [ -n "$MOUNTED_PARTS" ]; then
+    echo "ERROR: $DEVICE has mounted partitions. Run:"
+    for p in $MOUNTED_PARTS; do
+        echo "  udisksctl unmount -b /dev/$p"
+    done
     exit 1
 fi
 
