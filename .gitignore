@@ -1,0 +1,13 @@
+# Build outputs never live in this repo — they go on /media/blankmcu/EmbeddedLinux
+build*/
+downloads/
+sstate-cache/
+poky/
+meta-raspberrypi/
+*.img
+*.wic
+*.wic.bz2
+
+# Editor noise
+*.swp
+.vscode/
