@@ -51,3 +51,14 @@ logos, "Please wait: booting...", then the login prompt.
   the serial console in the cmdline (possible from local.conf; candidate
   exercise for Phase 2 image customization).
 - debug-tweaks = passwordless root. Never in production images.
+
+## Post-boot findings from the target
+
+- `uname -r` → `6.6.63-v8-16k`: v8 = ARMv8 64-bit; **16k = 16 KB page
+  size**, the meta-raspberrypi default for the Pi 5 (fewer TLB misses on
+  Cortex-A76). Caveat for later: software assuming 4 KB pages can break
+  on 16 K kernels.
+- `/etc/os-release` does NOT exist — it's a separate `os-release` package
+  in poky, not pulled in by packagegroup-core-boot. Minimal means even
+  the OS identity file is opt-in. What exists instead: `/etc/issue`
+  (login banner, from base-files) and `/etc/version` (image build date).
