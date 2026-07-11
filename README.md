@@ -51,7 +51,7 @@ Phase 1 — First boot (book ch. 6)
 Phase 2 — Understand what just happened (ch. 6, 8)
 - [ ] Layers, recipes, tasks: read a simple recipe end to end
 - [ ] `bitbake -e`, task logs, `oe-pkgdata-util` — inspecting the build
-- [ ] Customize the image via local.conf (add packages, ssh)
+- [x] Customize the image via local.conf (dropbear ssh, os-release, cmdline) — ssh'd in 2026-07-11
 
 Phase 3 — Your own layer (ch. 7)
 - [ ] Create `meta-playground` with `bitbake-layers create-layer`
