@@ -51,6 +51,12 @@ Phase 4 — Below the surface (ch. 3, 4 applied via Yocto)
 - [ ] Device tree overlays (blink an LED / read a sensor on GPIO)
 - [ ] Add a systemd service to the image
 
+Phase 5 — Real-world skills (ch. 7, 10)
+- [ ] Build your own distro conf
+- [ ] Package feeds & runtime package management
+- [ ] SDK generation (`bitbake -c populate_sdk`) for app development
+- [ ] OTA updates (Mender or RAUC layer)
+
 Phase 6 — CAPSTONE: real product on the Pi Zero W
 Replace Raspberry Pi OS Lite (~2 min boot) on the deployed USB serial
 logger with a purpose-built image (target: boot to working SSH + logging
@@ -61,12 +67,6 @@ in ~10-15 s):
 - [ ] Recipe for the USB serial logger (udev rule + script, ftdi/cp210x/ch341 modules)
 - [ ] Measure, then optimize: trim kernel config, quiet boot, static IP option
 - [ ] Read-only rootfs so yanking power can't corrupt the SD card
-
-Phase 5 — Real-world skills (ch. 7, 10)
-- [ ] Build your own distro conf
-- [ ] Package feeds & runtime package management
-- [ ] SDK generation (`bitbake -c populate_sdk`) for app development
-- [ ] OTA updates (Mender or RAUC layer)
 
 ## Notes
 
