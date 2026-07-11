@@ -33,7 +33,7 @@ bitbake core-image-minimal      # or whatever we're building
 Phase 1 — First boot (book ch. 6)
 - [x] Host setup, clone poky + meta-raspberrypi (scarthgap)
 - [x] Build `core-image-minimal` for `raspberrypi5` (2026-07-11, 3729 tasks)
-- [ ] Flash to SD card (`scripts/flash-sd.sh`), boot, log in over serial/HDMI
+- [x] Flash to SD card (`scripts/flash-sd.sh`), boot, log in — Pi 5 booted 2026-07-11 🎉
 
 Phase 2 — Understand what just happened (ch. 6, 8)
 - [ ] Layers, recipes, tasks: read a simple recipe end to end
