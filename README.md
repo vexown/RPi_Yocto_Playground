@@ -21,6 +21,19 @@ identical; syntax differences are noted in `notes/` as they come up.
 ./scripts/host-setup.sh   # apt packages + Ubuntu 24.04 AppArmor/userns fix (uses sudo)
 ```
 
+## Connecting to the Pi (no router needed)
+
+Direct ethernet cable PC ↔ Pi. The PC shares its WiFi internet over the
+wired port via a NetworkManager connection created once with:
+
+```bash
+nmcli connection add type ethernet ifname enp6s0 con-name pi-share \
+    ipv4.method shared connection.autoconnect yes
+```
+
+PC becomes 10.42.0.1 + DHCP server + NAT gateway; the Pi gets an address
+on boot. Find it with `ip neigh show dev enp6s0`, then `ssh root@<ip>`.
+
 ## Daily workflow
 
 ```bash
