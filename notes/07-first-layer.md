@@ -56,5 +56,34 @@ ssh yocto                          # (IP may change — ip neigh show dev enp6s0
 hello                              # aarch64 says hello
 ```
 
+## The temp/ dir — debugging ground truth (hands-on, 2026-07-12)
+
+Every task leaves a pair in `tmp/work/<arch>/<pn>/<pv>/temp/`:
+- `run.do_<task>` — the ACTUAL generated shell script, all variables
+  expanded. (Expansion is textual and happens even inside comments —
+  our "# ${CC} is..." comment turned into the full compiler line. Proof
+  these functions are templates, not parsed shell.)
+- `log.do_<task>` — what it printed. Near-empty on success; on failure
+  the compiler error is here, and bitbake's console ERROR gives the path.
+- `log.task_order` — the sequence tasks really ran in.
+
+What the expanded ${CC}/${CFLAGS}/${LDFLAGS} revealed, flag by flag:
+- `-mcpu=cortex-a76+crypto` — from MACHINE via meta-raspberrypi tune files
+  (the Pi Zero W build will say arm1176jzf-s; recipe unchanged).
+- `--sysroot=.../recipe-sysroot` — per-recipe PRIVATE sysroot containing
+  only declared DEPENDS. Missing DEPENDS = "header not found" even if the
+  lib was built — deliberate isolation against undeclared deps.
+- `-fstack-protector-strong -D_FORTIFY_SOURCE=2 -Wl,-z,relro,-z,now` —
+  distro-wide security hardening, free for every recipe.
+- `-Wl,--hash-style=gnu` — the literal flag the "No GNU_HASH" QA check
+  looks for; carried by ${LDFLAGS}.
+- `-fdebug-prefix-map=<workdir>=/usr/src/debug/...` — reproducible builds:
+  build-machine paths scrubbed from debug info.
+
+Rebuild-by-hand cheat sheet: `bitbake -c cleansstate hello` (workdir +
+sstate, forces real rebuild) then `bitbake hello`. `-c clean` alone is
+pointless for this (sstate restores instantly); `-c cleanall` also drops
+downloads (rarely wanted).
+
 Remaining Phase 3 item: devtool workflow (modify a recipe's source,
 capture the change as a patch).
