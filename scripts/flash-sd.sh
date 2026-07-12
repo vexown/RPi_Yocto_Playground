@@ -1,21 +1,24 @@
 #!/bin/bash
 # Flash the latest Yocto image onto an SD card.
 #
-# Usage:  ./scripts/flash-sd.sh /dev/sdX
+# Usage:  ./scripts/flash-sd.sh /dev/sdX [image-name]
 #         (find your SD card device with `lsblk -d -o NAME,SIZE,TRAN,MODEL`)
+# image-name defaults to playground-image (our own image recipe);
+# pass e.g. core-image-minimal to flash the stock one instead.
 #
 # What a .wic image is: a complete, already-partitioned disk image.
 # For the Pi 5 it contains two partitions:
 #   p1 (FAT32, "bootfiles"): GPU firmware, config.txt, cmdline.txt,
 #       the kernel (as Image), and device tree blobs/overlays.
 #       The Pi's boot ROM + firmware read this directly — no U-Boot involved.
-#   p2 (ext4): the root filesystem built by core-image-minimal.
+#   p2 (ext4): the root filesystem built by the image recipe.
 # So we write it to the *whole device* (/dev/sdX), not a partition (/dev/sdX1).
 set -e
 
 IMAGE_DIR="/media/blankmcu/EmbeddedLinux/yocto/build-rpi5/tmp/deploy/images/raspberrypi5"
+IMAGE_NAME="${2:-playground-image}"
 # The unversioned name is a symlink that always points at the latest build.
-IMAGE="$IMAGE_DIR/core-image-minimal-raspberrypi5.rootfs.wic.bz2"
+IMAGE="$IMAGE_DIR/$IMAGE_NAME-raspberrypi5.rootfs.wic.bz2"
 
 DEVICE="$1"
 

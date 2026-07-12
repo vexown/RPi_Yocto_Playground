@@ -68,9 +68,9 @@ Phase 2 — Understand what just happened (ch. 6, 8)
 - [x] Customize the image via local.conf (dropbear ssh, os-release, cmdline) — ssh'd in 2026-07-11
 
 Phase 3 — Your own layer (ch. 7)
-- [ ] Create `meta-playground` with `bitbake-layers create-layer`
-- [ ] Write a recipe for a hello-world C program
-- [ ] Write a custom image recipe (`playground-image.bb`)
+- [x] Create `meta-playground` with `bitbake-layers create-layer` (2026-07-12)
+- [x] Write a recipe for a hello-world C program (`recipes-apps/hello`)
+- [x] Write a custom image recipe (`playground-image.bb`) — built, 37 pkgs
 - [ ] devtool workflow: modify a recipe's source, capture as patch
 
 Phase 4 — Below the surface (ch. 3, 4 applied via Yocto)
