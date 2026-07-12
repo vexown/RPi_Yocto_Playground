@@ -7,7 +7,7 @@
 # by hand. That makes this the best recipe for seeing the raw mechanics.
 
 SUMMARY = "Hello-world proving out our meta-playground layer"
-HOMEPAGE = "https://github.com/blankMCU/RPi_Yocto_Playground"
+HOMEPAGE = "https://github.com/vexown/RPi_Yocto_Playground"
 
 # Every recipe MUST declare a license and checksum the license text
 # (build fails if the text ever changes — license compliance by force).
