@@ -56,6 +56,17 @@ ssh yocto                          # (IP may change — ip neigh show dev enp6s0
 hello                              # aarch64 says hello
 ```
 
+**BOOTED 2026-07-12** — `hello` on the Pi 5 printed
+`Running on: Linux 6.6.63-v8-16k (aarch64)`: cross-compile proven on
+target, full repo→layer→recipe→image→hardware chain closed.
+
+(Flash war story: first attempt died with `dd: fsync failed ... I/O error`
+— writes stream into RAM cache at fake ~100 MB/s, the error only surfaces
+when fsync forces them onto the card. Reseating the USB reader fixed it.
+If it recurs: `sudo dmesg | tail -40` to tell card vs. reader apart;
+`f3probe` for counterfeit cards, `badblocks -wsv` for worn ones. Never
+boot from a flash run that errored — assume corrupt.)
+
 ## The temp/ dir — debugging ground truth (hands-on, 2026-07-12)
 
 Every task leaves a pair in `tmp/work/<arch>/<pn>/<pv>/temp/`:
