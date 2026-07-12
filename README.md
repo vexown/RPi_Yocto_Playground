@@ -63,8 +63,8 @@ Phase 1 — First boot (book ch. 6)
 - [x] Flash to SD card (`scripts/flash-sd.sh`), boot, log in — Pi 5 booted 2026-07-11 🎉
 
 Phase 2 — Understand what just happened (ch. 6, 8)
-- [ ] Layers, recipes, tasks: read a simple recipe end to end
-- [ ] `bitbake -e`, task logs, `oe-pkgdata-util` — inspecting the build
+- [x] Layers, recipes, tasks: read a simple recipe end to end (dropbear, notes/05)
+- [x] `bitbake -e`, task logs, `oe-pkgdata-util` — inspecting the build (2026-07-12)
 - [x] Customize the image via local.conf (dropbear ssh, os-release, cmdline) — ssh'd in 2026-07-11
 
 Phase 3 — Your own layer (ch. 7)
