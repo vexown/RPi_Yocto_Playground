@@ -8,7 +8,7 @@
 #include <stdio.h>
 #include <sys/utsname.h>
 
-int main(void)
+int main(int argc, char **argv)
 {
     struct utsname u;
 
@@ -19,6 +19,9 @@ int main(void)
      * aarch64 even though we built it on an x86_64 PC. */
     if (uname(&u) == 0)
         printf("Running on: %s %s (%s)\n", u.sysname, u.release, u.machine);
+
+    if (argc > 1)
+        printf("Greetings, %s!\n", argv[1]);
 
     return 0;
 }

@@ -71,7 +71,7 @@ Phase 3 — Your own layer (ch. 7)
 - [x] Create `meta-playground` with `bitbake-layers create-layer` (2026-07-12)
 - [x] Write a recipe for a hello-world C program (`recipes-apps/hello`)
 - [x] Write a custom image recipe (`playground-image.bb`) — built, 37 pkgs
-- [ ] devtool workflow: modify a recipe's source, capture as patch
+- [x] devtool workflow: modify a recipe's source, capture as patch (2026-07-12) — **Phase 3 complete**
 
 Phase 4 — Below the surface (ch. 3, 4 applied via Yocto)
 - [ ] Kernel config tweaks (`bitbake -c menuconfig virtual/kernel`, config fragments)
