@@ -74,7 +74,7 @@ Phase 3 — Your own layer (ch. 7)
 - [x] devtool workflow: modify a recipe's source, capture as patch (2026-07-12) — **Phase 3 complete**
 
 Phase 4 — Below the surface (ch. 3, 4 applied via Yocto)
-- [ ] Kernel config tweaks (`bitbake -c menuconfig virtual/kernel`, config fragments)
+- [x] Kernel config tweaks (`bitbake -c menuconfig virtual/kernel`, config fragments) — /proc/config.gz live 2026-07-14
 - [ ] Device tree overlays (blink an LED / read a sensor on GPIO)
 - [ ] Add a systemd service to the image
 

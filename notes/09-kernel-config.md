@@ -53,3 +53,21 @@ bitbake playground-image          # kernel recompiles — tens of minutes
 # on the Pi:
 zcat /proc/config.gz | grep IKCONFIG
 ```
+
+**VERIFIED on target 2026-07-14**: CONFIG_IKCONFIG=y + CONFIG_IKCONFIG_PROC=y
+straight from /proc/config.gz. Also seen along the way:
+- `bitbake -e` variable history: the "#" line above SRC_URI= shows the
+  raw unexpanded value (inline ${@bb.utils.contains(...)} python);
+  sccs_from_src_uri showed OUR fragment collected alongside the BSP's own.
+- "do_compile is tainted from a forced run" WARNING = menuconfig's doing:
+  cml1.bbclass taints kernel do_compile on save so interactive config
+  changes actually get compiled. Benign; clears when the task reruns
+  (or bitbake -c clean virtual/kernel).
+- Sstate summary read: Wanted 14 / Missed 14 / Current 1785 — exactly the
+  kernel chain invalidated, nothing else.
+- Config symbol names vary by arch/version: the Pi 5's 16K pages are
+  CONFIG_ARM64_16K_PAGES (not PAGE_SIZE_16KB) — grep flexibly before
+  declaring an option absent.
+- Target-side zcat/zgrep/bzcat: cat/grep for compressed streams;
+  /proc/config.gz is gzipped in kernel memory. flash-sd.sh's bzcat|dd is
+  the same idea. On the Pi zcat is another busybox applet.
