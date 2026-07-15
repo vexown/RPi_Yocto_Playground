@@ -75,7 +75,7 @@ Phase 3 — Your own layer (ch. 7)
 
 Phase 4 — Below the surface (ch. 3, 4 applied via Yocto)
 - [x] Kernel config tweaks (`bitbake -c menuconfig virtual/kernel`, config fragments) — /proc/config.gz live 2026-07-14
-- [ ] Device tree overlays (blink an LED / read a sensor on GPIO)
+- [ ] Device tree overlays (blink an LED / read a sensor on GPIO) — DT intro + dtparam ACT-LED heartbeat done 2026-07-16 (notes/10); custom .dts overlay still to come
 - [ ] Add a systemd service to the image
 
 Phase 5 — Real-world skills (ch. 7, 10)
