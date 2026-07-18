@@ -1,0 +1,29 @@
+# playground-pulse.service — our first systemd unit.
+#
+# Units are DECLARATIVE: no init-script boilerplate, no start/stop/status
+# case statement like sysvinit would need. We state what to run and when;
+# systemd derives the rest (ordering, supervision, logging to the journal).
+#
+# Ties sessions together: the overlay (session 6) boots the playground LED
+# blinking on the "timer" trigger; this service switches it to "heartbeat"
+# at boot. Steady blink -> thump-thump = visible proof the service ran,
+# before you even ssh in.
+
+[Unit]
+Description=Give the playground LED a heartbeat
+# No After=/Requires= needed: sysfs LED entries appear when the driver
+# binds during kernel init, long before services start.
+
+[Service]
+# oneshot: runs to completion, not a daemon to supervise.
+Type=oneshot
+# The same echo you typed by hand, now institutionalized. sh -c because
+# the redirection ">" is shell syntax — ExecStart alone doesn't do shells.
+ExecStart=/bin/sh -c 'echo heartbeat > /sys/class/leds/playground/trigger'
+# Keep reporting "active" after the process exits, so
+# `systemctl status playground-pulse` shows success, not "inactive".
+RemainAfterExit=yes
+
+[Install]
+# Which boot target pulls us in when enabled — multi-user = normal boot.
+WantedBy=multi-user.target

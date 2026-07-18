@@ -17,15 +17,21 @@ LICENSE = "MIT"
 inherit core-image
 
 # The one line that defines the OS. packagegroup-core-boot is the same
-# "bootable minimum" core-image-minimal uses; then our additions:
-#   dropbear     — ssh server (was: ssh-server-dropbear feature in local.conf)
-#   os-release   — /etc/os-release identity (was: IMAGE_INSTALL:append)
-#   hello        — our first own recipe, from this very layer
+# "bootable minimum" core-image-minimal uses (and it follows
+# VIRTUAL-RUNTIME_init_manager — so the INIT_MANAGER flip in local.conf
+# is what swaps busybox-init for systemd in here); then our additions:
+#   dropbear         — ssh server (was: ssh-server-dropbear feature in local.conf)
+#   os-release       — /etc/os-release identity (was: IMAGE_INSTALL:append)
+#   hello            — our first own recipe, from this very layer
+#   playground-pulse — session 7: our systemd unit (LED heartbeat at boot)
+#   systemd-analyze  — boot-time profiler; capstone recon tool
 IMAGE_INSTALL = "\
     packagegroup-core-boot \
     dropbear \
     os-release \
     hello \
+    playground-pulse \
+    systemd-analyze \
     "
 
 # No locale packages — same trick core-image-minimal uses to stay small.
