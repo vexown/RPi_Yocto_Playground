@@ -76,7 +76,7 @@ Phase 3 — Your own layer (ch. 7)
 Phase 4 — Below the surface (ch. 3, 4 applied via Yocto)
 - [x] Kernel config tweaks (`bitbake -c menuconfig virtual/kernel`, config fragments) — /proc/config.gz live 2026-07-14
 - [x] Device tree overlays — dtparam heartbeat (notes/10) + custom playground-led overlay on GPIO17, LED blinking on target 2026-07-18 (notes/11)
-- [ ] Add a systemd service to the image
+- [x] Add a systemd service to the image — INIT_MANAGER flip + playground-pulse unit, verified 2026-07-18 (notes/12) — **Phase 4 complete**
 
 Phase 5 — Real-world skills (ch. 7, 10)
 - [ ] Build your own distro conf
