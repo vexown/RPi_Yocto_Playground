@@ -58,6 +58,29 @@ the clock to real 2026 (hence the absurd relative age). Embedded gotcha:
 log timestamps from before time-sync lie. Fixes: RTC battery, or accept
 + know it. Verify current clock with `date`.
 
+## Second boot: reading systemd-analyze properly
+
+Reboot #2: 6.325s kernel + 2.169s userspace = 8.495s. First-boot
+services (ldconfig, machine-id-commit, dropbearkey) gone as predicted:
+userspace 6.7s -> 2.2s.
+
+How to read the numbers (the "these don't add up" lesson):
+- `blame` covers ONLY the userspace phase — compare its entries to
+  2.169s, never the 8.5s total. Kernel time is one opaque block with no
+  units to blame.
+- sum(blame) was ~4.5s inside 2.1s of wall clock: entries OVERLAP
+  because systemd starts everything dependency-ready in parallel.
+  Oversumming = healthy parallelism, not an accounting error.
+- blame = per-unit COST (unordered shopping list);
+  `systemd-analyze critical-chain` = the BOTTLENECK — the one dependency
+  chain that determined when multi-user.target was reached
+  (@x.xxxs = when reached, +xxxms = that link's own duration). Capstone
+  weapon is critical-chain; blame is triage.
+- Kernel phase VARIED between boots (3.6s -> 6.3s) — dmesg [timestamps]
+  are the tool for gaps there; blame can't see into kernel time. For the
+  capstone, kernel time is attacked via config trimming + quiet boot,
+  separately from unit optimization.
+
 ## Misc
 
 - busybox head wants `-n 15`; GNU's bare `-15` shorthand doesn't exist
