@@ -76,6 +76,15 @@ How to read the numbers (the "these don't add up" lesson):
   chain that determined when multi-user.target was reached
   (@x.xxxs = when reached, +xxxms = that link's own duration). Capstone
   weapon is critical-chain; blame is triage.
+- Our actual chain: multi-user @2.128s <- dbus <- basic <- sockets <-
+  dropbear.socket <- sysinit <- resolved <- tmpfiles <- local-fs <-
+  boot.mount <- dev-mmcblk0p1.device @1.632s. Read: ~1.6s waiting for
+  the SD card to enumerate, ~0.5s for everything else. blame's 840ms
+  mmcblk0p2 was NOT on the path (absorbed in parallel); p1 gated via
+  boot.mount. dropbear.SOCKET on the chain (listening is instant), and
+  playground-pulse nowhere = perfect parallel citizen. Lesson: lean
+  systemd userspace is nearly free — boot time hides in kernel phase +
+  storage init. That's where the Pi Zero W's 2 minutes will be hiding.
 - Kernel phase VARIED between boots (3.6s -> 6.3s) — dmesg [timestamps]
   are the tool for gaps there; blame can't see into kernel time. For the
   capstone, kernel time is attacked via config trimming + quiet boot,
