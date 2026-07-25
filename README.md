@@ -79,7 +79,7 @@ Phase 4 — Below the surface (ch. 3, 4 applied via Yocto)
 - [x] Add a systemd service to the image — INIT_MANAGER flip + playground-pulse unit, verified 2026-07-18 (notes/12) — **Phase 4 complete**
 
 Phase 5 — Real-world skills (ch. 7, 10)
-- [ ] Build your own distro conf
+- [x] Build your own distro conf — playground distro (INIT_MANAGER policy moved out of local.conf), /etc/os-release verified 2026-07-25 (notes/13)
 - [ ] Package feeds & runtime package management
 - [ ] SDK generation (`bitbake -c populate_sdk`) for app development
 - [ ] OTA updates (Mender or RAUC layer)
