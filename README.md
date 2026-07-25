@@ -80,7 +80,7 @@ Phase 4 — Below the surface (ch. 3, 4 applied via Yocto)
 
 Phase 5 — Real-world skills (ch. 7, 10)
 - [x] Build your own distro conf — playground distro (INIT_MANAGER policy moved out of local.conf), /etc/os-release verified 2026-07-25 (notes/13)
-- [ ] Package feeds & runtime package management
+- [x] Package feeds & runtime package management — rpm feed served from the PC, `dnf install less` on the running Pi 2026-07-25 (notes/14)
 - [ ] SDK generation (`bitbake -c populate_sdk`) for app development
 - [ ] OTA updates (Mender or RAUC layer)
 
