@@ -34,6 +34,18 @@ IMAGE_INSTALL = "\
     systemd-analyze \
     "
 
+# Session 9: give the image a package manager. Surprise: there isn't one
+# by default! Yocto USES a package manager (dnf, on the build host) to
+# ASSEMBLE the rootfs from the .rpms in tmp/deploy/rpm/, then normally
+# ships an image with no way to install anything — embedded devices
+# usually don't apt-get. This feature keeps dnf+rpm ON the target
+# (FEATURE_PACKAGES_package-management -> ROOTFS_PKGMANAGE in
+# image.bbclass), which drags in python3 — the image gets visibly
+# bigger. That's the trade: field-updatable packages vs footprint.
+# Where the target LOOKS for packages is not identity, it's environment
+# -> PACKAGE_FEED_URIS lives in local.conf, not here and not the distro.
+IMAGE_FEATURES += "package-management"
+
 # No locale packages — same trick core-image-minimal uses to stay small.
 IMAGE_LINGUAS = " "
 
