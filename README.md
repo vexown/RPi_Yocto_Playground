@@ -81,7 +81,7 @@ Phase 4 — Below the surface (ch. 3, 4 applied via Yocto)
 Phase 5 — Real-world skills (ch. 7, 10)
 - [x] Build your own distro conf — playground distro (INIT_MANAGER policy moved out of local.conf), /etc/os-release verified 2026-07-25 (notes/13)
 - [x] Package feeds & runtime package management — rpm feed served from the PC, `dnf install less` on the running Pi 2026-07-25 (notes/14)
-- [ ] SDK generation (`bitbake -c populate_sdk`) for app development
+- [x] SDK generation (`bitbake -c populate_sdk`) — installed to /opt/playground/0.1, sdk-demo app built outside Yocto + ran on target 2026-07-25 (notes/15)
 - [ ] OTA updates (Mender or RAUC layer)
 
 Phase 6 — CAPSTONE: real product on the Pi Zero W
