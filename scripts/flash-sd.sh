@@ -67,9 +67,72 @@ lsblk -d -o NAME,SIZE,MODEL "$DEVICE"
 read -r -p "Type 'yes' to continue: " CONFIRM
 [ "$CONFIRM" = "yes" ] || { echo "Aborted."; exit 1; }
 
+# --- Phase 1: write ----------------------------------------------------------
 # bzcat decompresses on the fly; dd writes raw bytes to the card.
-# conv=fsync + sync make sure everything hit the card before we say done.
-bzcat "$IMAGE" | sudo dd of="$DEVICE" bs=4M status=progress conv=fsync
-sync
+#
+# Note what is deliberately NOT here any more: conv=fsync. It used to be on
+# this line, and it made the script look frozen. Here's the mechanism, because
+# it bites people on every OS:
+#
+#   A write to a block device normally lands in the kernel's PAGE CACHE and
+#   returns immediately — "written" means "queued", not "on the flash". So
+#   dd's status=progress races to 100% at RAM speed, then conv=fsync blocks
+#   until the card has actually caught up, printing NOTHING for minutes.
+#   Progress hits 100%, then silence: it looks like a hang, so people pull
+#   the card or kill the terminal exactly when they must not.
+#
+# The image doubled in size in session 11 (two rootfs slots), which turned a
+# barely-noticeable pause into a multi-minute one. So we now let dd finish
+# fast and honestly, and show the flush as its own phase below.
+echo ">>> Phase 1/3: writing image to $DEVICE ..."
+bzcat "$IMAGE" | sudo dd of="$DEVICE" bs=4M status=progress
 
-echo ">>> Done. Eject the card and boot the Pi."
+# --- Phase 2: flush ----------------------------------------------------------
+# sync(2) returns only once every dirty page is on stable storage. Rather
+# than call it and stare at a dead terminal, run it in the background and
+# report how much is left.
+#
+# /proc/meminfo's Dirty = pages modified but not yet written out;
+# Writeback = pages currently in flight to the device. Their sum is the
+# backlog. It is a SYSTEM-WIDE number, so on a busy machine other processes
+# contribute — but during a flash it's essentially all ours, and watching it
+# fall to zero is the clearest possible "the card is really done" signal.
+echo ">>> Phase 2/3: flushing kernel cache to the card ..."
+echo "    (dd is finished; the card is not. Do NOT remove it yet.)"
+sync &
+SYNC_PID=$!
+while kill -0 "$SYNC_PID" 2>/dev/null; do
+    BACKLOG_KB=$(awk '/^Dirty:|^Writeback:/ { total += $2 } END { print total+0 }' /proc/meminfo)
+    printf "\r    %6d MB left to write ... " "$((BACKLOG_KB / 1024))"
+    sleep 1
+done
+wait "$SYNC_PID"
+printf "\r    flush complete.                    \n"
+
+# --- Phase 3: verify ---------------------------------------------------------
+# "It probably wrote fine" is not good enough for a card you're about to put
+# in a device that's hard to reach. Read the card back and compare it against
+# the image, byte for byte.
+#
+# Skip with:  VERIFY=0 ./scripts/flash-sd.sh /dev/sdX
+#
+# Subtlety in reading cmp's output: the card is BIGGER than the image, so the
+# decompressed stream always ends first and cmp reports "EOF on -" with exit
+# status 1. That is the expected, successful outcome — not a mismatch. A real
+# corruption prints a line containing "differ", which is what we test for.
+if [ "${VERIFY:-1}" = "1" ]; then
+    echo ">>> Phase 3/3: verifying (reading the card back) ..."
+    CMP_OUT=$(bzcat "$IMAGE" | sudo cmp - "$DEVICE" 2>&1 || true)
+    if printf '%s' "$CMP_OUT" | grep -q "differ"; then
+        echo "ERROR: verification FAILED — the card does not match the image:"
+        echo "  $CMP_OUT"
+        echo "The card is not trustworthy. Re-run the flash."
+        exit 1
+    fi
+    echo "    verified: card matches the image."
+else
+    echo ">>> Phase 3/3: verification skipped (VERIFY=0)."
+fi
+
+echo
+echo ">>> Done. Safe to eject the card and boot the Pi."
