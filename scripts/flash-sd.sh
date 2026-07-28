@@ -7,12 +7,21 @@
 # pass e.g. core-image-minimal to flash the stock one instead.
 #
 # What a .wic image is: a complete, already-partitioned disk image.
-# For the Pi 5 it contains two partitions:
-#   p1 (FAT32, "bootfiles"): GPU firmware, config.txt, cmdline.txt,
-#       the kernel (as Image), and device tree blobs/overlays.
-#       The Pi's boot ROM + firmware read this directly — no U-Boot involved.
-#   p2 (ext4): the root filesystem built by the image recipe.
 # So we write it to the *whole device* (/dev/sdX), not a partition (/dev/sdX1).
+#
+# Session 11 changed the layout (WKS_FILE in local.conf). It used to be two
+# partitions; the A/B update scheme needs five:
+#   p1 (FAT32, "boot"): GPU firmware, config.txt, cmdline.txt, the kernel
+#       (as Image), device tree blobs/overlays — and now U-Boot plus its
+#       compiled boot script and its environment block. Shared by both
+#       slots, which is why a kernel change still needs a reflash.
+#   p2 (ext4, "rootfs_A") and p3 (ext4, "rootfs_B"): two full copies of the
+#       root filesystem. You run from one and update the other.
+#   p5 (ext4, "data"): persistent storage, survives updates by living
+#       outside both slots. RAUC's data-directory points here.
+#   p6 (ext4, "homefs"): /home, grown on first boot.
+# (There is no p4: p1-p3 plus an extended-partition container is how MBR
+# gets past four entries, and wic numbers the logical ones from 5.)
 set -e
 
 IMAGE_DIR="/media/blankmcu/EmbeddedLinux/yocto/build-rpi5/tmp/deploy/images/raspberrypi5"

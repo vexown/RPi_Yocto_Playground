@@ -4,9 +4,22 @@ downloads/
 sstate-cache/
 poky/
 meta-raspberrypi/
+meta-rauc/
+meta-rauc-community/
+meta-lts-mixins/
 *.img
 *.wic
 *.wic.bz2
+*.raucb
+
+# Private keys, ever, under any name. The RAUC signing keys live on the
+# build disk (scripts/rauc-gen-keys.sh) and must never reach this public
+# repo; this is the backstop in case one is ever copied here by mistake.
+# The CA *certificate* is public and deliberately NOT ignored — it is the
+# trust anchor baked into every image.
+*.key.pem
+*.key
+private/
 
 # Editor noise
 *.swp

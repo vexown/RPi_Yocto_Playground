@@ -37,6 +37,31 @@ if [ ! -d "$YOCTO_DIR/meta-raspberrypi" ]; then
         "$YOCTO_DIR/meta-raspberrypi" || return 1
 fi
 
+# --- OTA / RAUC layers (session 11) -----------------------------------------
+# meta-rauc: the RAUC update client recipe plus bundle.bbclass (which turns
+#   an image into a signed .raucb update bundle).
+if [ ! -d "$YOCTO_DIR/meta-rauc" ]; then
+    git clone -b "$RELEASE" https://github.com/rauc/meta-rauc.git \
+        "$YOCTO_DIR/meta-rauc" || return 1
+fi
+# meta-rauc-community: BSP-specific glue for a dozen boards. We add exactly
+#   one sub-layer from it (meta-rauc-raspberrypi) in bblayers.conf — it
+#   carries the dual-rootfs wic layout and the U-Boot boot script that
+#   implements slot selection and the retry counter.
+if [ ! -d "$YOCTO_DIR/meta-rauc-community" ]; then
+    git clone -b "$RELEASE" https://github.com/rauc/meta-rauc-community.git \
+        "$YOCTO_DIR/meta-rauc-community" || return 1
+fi
+# meta-lts-mixins: NOT optional for the Pi 5. Scarthgap froze U-Boot at
+#   2024.01, which predates usable Raspberry Pi 5 support; this "mixin"
+#   layer backports current U-Boot (2025.04) into the LTS. Hence the
+#   unusual branch name — the layer has one branch per backported
+#   component, not one per Yocto release.
+if [ ! -d "$YOCTO_DIR/meta-lts-mixins" ]; then
+    git clone -b "$RELEASE/u-boot" https://git.yoctoproject.org/meta-lts-mixins \
+        "$YOCTO_DIR/meta-lts-mixins" || return 1
+fi
+
 FIRST_TIME=0
 [ -d "$BUILD_DIR/conf" ] || FIRST_TIME=1
 

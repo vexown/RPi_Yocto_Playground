@@ -25,6 +25,12 @@ inherit core-image
 #   hello            — our first own recipe, from this very layer
 #   playground-pulse — session 7: our systemd unit (LED heartbeat at boot)
 #   systemd-analyze  — boot-time profiler; capstone recon tool
+#   rauc             — session 11: the OTA update client. The distro says
+#                      "this OS supports RAUC" (DISTRO_FEATURES); this line
+#                      is what actually puts the `rauc` command on the
+#                      target. It pulls in u-boot-fw-utils with it, because
+#                      flipping the boot slot means writing U-Boot's
+#                      environment from Linux (fw_setenv).
 IMAGE_INSTALL = "\
     packagegroup-core-boot \
     dropbear \
@@ -32,6 +38,7 @@ IMAGE_INSTALL = "\
     hello \
     playground-pulse \
     systemd-analyze \
+    rauc \
     "
 
 # Session 9: give the image a package manager. Surprise: there isn't one
