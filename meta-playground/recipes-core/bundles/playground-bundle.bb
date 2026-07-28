@@ -50,11 +50,22 @@ RAUC_BUNDLE_FORMAT = "verity"
 # One slot class, "rootfs", matching [slot.rootfs.0] / [slot.rootfs.1] in
 # system.conf. RAUC picks whichever of the two is INACTIVE at install time.
 #
-# Note what we are NOT updating: the kernel and the boot partition. On the
-# Pi they live in the shared FAT partition (p1), outside both slots, so a
-# kernel change still needs a reflash. Making the kernel updatable too
-# means either duplicating the boot partition or moving the kernel inside
-# the rootfs — a real design decision, deferred here on purpose.
+# The kernel rides along for free, which is easy to get wrong: look at the
+# boot script (meta-rauc-raspberrypi/recipes-bsp/rpi-u-boot-scr/boot.cmd.in)
+# and you'll see it set BOOT_DEV to "mmc 0:2" or "mmc 0:3" — the ROOTFS
+# partition of the chosen slot — and then `load ${BOOT_DEV} ... boot/Image`.
+# So U-Boot reads the kernel out of the slot's own /boot, and a bundle that
+# replaces the rootfs replaces its kernel too. (Verified on the card: the
+# copy of Image sitting in the FAT partition is deployed by IMAGE_BOOT_FILES
+# but never actually booted from.)
+#
+# What genuinely stays shared, outside both slots, is everything the Pi's
+# firmware touches before U-Boot exists: config.txt, cmdline.txt, the device
+# tree and our overlays, the GPU firmware blobs — and U-Boot itself. Change
+# any of those and you still need physical access to the card. Updating a
+# bootloader over the air is the genuinely dangerous case (a half-written
+# bootloader is an unbootable board), which is why it usually gets its own
+# redundancy scheme or is simply declared out of scope.
 RAUC_BUNDLE_SLOTS = "rootfs"
 RAUC_SLOT_rootfs = "playground-image"
 RAUC_SLOT_rootfs[fstype] = "ext4"
