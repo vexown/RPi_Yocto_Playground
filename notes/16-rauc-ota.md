@@ -197,13 +197,39 @@ env write hangs" story I'd built from reading `env_fat_save()`.
    stories I told (bootstd vs distro_bootcmd; first-time FAT env write)
    were specific, sourced from real code, and wrong.
 
-## Still open
+## Still open — and a late lead
 
-The original failure is unexplained. Leading suspects: SD card seating
-(the session opened with "the card bugged out during flash"), or an
-intermittent U-Boot hang on the Pi 5 — meta-raspberrypi's own bbappend
-carries a comment about "boot issues without a connected debug UART".
-Deliberately **no fix committed**: there is no confirmed bug to fix.
+Reliability check: **10/10 power cycles booted.** But every one of those
+ten, and the six before, had the **Ethernet cable plugged in**. The only
+failure this project has ever seen was the one boot with it *unplugged* —
+a variable neither of us was tracking, remembered after the fact.
 
-Next: 10 power cycles to characterise reliability, then build the bundle,
-`rauc install` it, boot into slot B, and force a rollback.
+One-for-one correlation on n=1, so not a conclusion. But there is a
+mechanism that fits. Stock U-Boot runs `bootcmd=bootflow scan` over
+`boot_targets=mmc usb pxe dhcp`. Normally `mmc` yields `boot.scr` at once
+and the network is never touched. If `mmc` misses even transiently, it
+falls through to `pxe` then `dhcp` — and with **no link** U-Boot's network
+retry can sit there indefinitely, which from outside is indistinguishable
+from a hang. With a live link, DHCP answers off the dev PC in
+milliseconds, fails to find a boot file, and the moment passes.
+
+That needs no component to be broken: a marginal SD read only becomes a
+permanent-looking hang when the fallback path has nothing to fail
+against. It also lets the card-reseating story be partly true.
+
+**Next session, first thing:** unplug Ethernet and boot 5x. Any failure
+is a reproduction — the thing we've been unable to get all session.
+
+If it reproduces, the fix is one we'd want anyway: pin `boot_targets` to
+`mmc`, or set an explicit `bootcmd` that loads `boot.scr` directly. A
+deployed device has no business wandering off to PXE and DHCP because its
+SD card blinked — slow, non-deterministic, and flatly wrong for the Pi
+Zero W capstone. Note the irony: that is nearly the first change tried,
+which the bisect then cleared as innocent. It may have been right for a
+reason not understood at the time — which is *also* why it stays
+uncommitted until measured.
+
+Deliberately **no fix committed**: there is still no confirmed bug.
+
+Then: build the bundle, `rauc install` it, boot into slot B, force a
+rollback.
