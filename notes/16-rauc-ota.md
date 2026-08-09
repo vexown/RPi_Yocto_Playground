@@ -217,19 +217,40 @@ That needs no component to be broken: a marginal SD read only becomes a
 permanent-looking hang when the fallback path has nothing to fail
 against. It also lets the card-reseating story be partly true.
 
-**Next session, first thing:** unplug Ethernet and boot 5x. Any failure
-is a reproduction — the thing we've been unable to get all session.
+Tested immediately: **5/5 boots with Ethernet unplugged.** Hypothesis
+dead. Third confident, mechanistically-plausible story to die by
+measurement in one session.
 
-If it reproduces, the fix is one we'd want anyway: pin `boot_targets` to
-`mmc`, or set an explicit `bootcmd` that loads `boot.scr` directly. A
-deployed device has no business wandering off to PXE and DHCP because its
-SD card blinked — slow, non-deterministic, and flatly wrong for the Pi
-Zero W capstone. Note the irony: that is nearly the first change tried,
-which the bisect then cleared as innocent. It may have been right for a
-reason not understood at the time — which is *also* why it stays
-uncommitted until measured.
+## Final disposition: unreproducible
 
-Deliberately **no fix committed**: there is still no confirmed bug.
+**16 boot attempts, 15 successes.** The single failure is the very first
+one, and it has survived no attempt to recreate it: original config,
+stock env, no env, corrupt env, with and without Ethernet, with and
+without a saved bootloader environment.
+
+Leading suspect remains **SD card seating** — the one physical thing that
+definitely changed between the failure and every success since. (Two
+separate incidents this session involved the card not being where we
+thought it was, which is its own kind of evidence.)
+
+Recorded as *unreproducible, monitored, not fixed*. That is a real
+engineering disposition, and a better one than committing a speculative
+fix and calling it solved. **No fix committed.** If it recurs we now have
+two things we didn't have at the start: the `uboot.env` forensic
+technique, and the knowledge that seeing U-Boot needs the JST-SH debug
+cable.
+
+### One change worth making anyway — on merit, not as a fix
+
+Pinning `boot_targets` to `mmc` (or setting an explicit `bootcmd` that
+loads `boot.scr` directly) is worth doing *independently*: it makes boot
+deterministic, and it stops the board probing USB, PXE and DHCP whenever
+anything hiccups. Boot time is the entire point of the Pi Zero W
+capstone, and that probing is pure latency.
+
+If we do it, it goes in as a deliberate design decision with that
+rationale — explicitly **not** as a fix for the failure above, which we
+cannot demonstrate it would have prevented.
 
 Then: build the bundle, `rauc install` it, boot into slot B, force a
 rollback.
