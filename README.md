@@ -82,9 +82,11 @@ Phase 5 — Real-world skills (ch. 7, 10)
 - [x] Build your own distro conf — playground distro (INIT_MANAGER policy moved out of local.conf), /etc/os-release verified 2026-07-25 (notes/13)
 - [x] Package feeds & runtime package management — rpm feed served from the PC, `dnf install less` on the running Pi 2026-07-25 (notes/14)
 - [x] SDK generation (`bitbake -c populate_sdk`) — installed to /opt/playground/0.1, sdk-demo app built outside Yocto + ran on target 2026-07-25 (notes/15)
-- [ ] OTA updates (Mender or RAUC layer) — RAUC chosen; A/B slots + U-Boot slot
-      selection + rollback counters VERIFIED booting on target 2026-08-09
-      (notes/16). Bundle build + `rauc install` + rollback demo still to do.
+- [x] OTA updates (Mender or RAUC layer) — RAUC A/B: boot chain verified
+      2026-08-09 (notes/16); signed bundle streamed over HTTP onto the running
+      Pi, booted slot B at 0.2, then forced a rollback to slot A at 0.1 by
+      masking `rauc-mark-good` — counters 2→1→0→fallback, 2026-08-15
+      (notes/17) — **Phase 5 complete**
 
 Phase 6 — CAPSTONE: real product on the Pi Zero W
 Replace Raspberry Pi OS Lite (~2 min boot) on the deployed USB serial

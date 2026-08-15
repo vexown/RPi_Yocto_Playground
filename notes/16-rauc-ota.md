@@ -253,4 +253,5 @@ rationale — explicitly **not** as a fix for the failure above, which we
 cannot demonstrate it would have prevented.
 
 Then: build the bundle, `rauc install` it, boot into slot B, force a
-rollback.
+rollback. **Done in notes/17** — all four, plus an unplanned lesson about
+HTTP range requests and another about per-slot machine identity.

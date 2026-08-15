@@ -32,9 +32,17 @@ inherit bundle
 # reason you cannot brick a Pi Zero W by handing it the Pi 5's firmware.
 RAUC_BUNDLE_COMPATIBLE = "${DISTRO}-${MACHINE}"
 
-# Free-form; shows up in `rauc status` and `rauc info`. Deliberately NOT
-# equal to DISTRO_VERSION (0.1) so that after installing we can see at a
-# glance that the running slot holds something newer than what we flashed.
+# Free-form string; shows up in `rauc info` and, after installing, as the
+# slot's "installed version" in `rauc status --detailed`. RAUC never parses
+# or compares it — there is no "is this newer?" logic anywhere in RAUC. That
+# policy belongs to whatever decides to call `rauc install`, which on a real
+# fleet is an update client talking to a server. Here it's you, at a prompt.
+#
+# We keep it deliberately distinct from DISTRO_VERSION ("0.2") so the two
+# can't be confused on the target: this string comes from the BUNDLE's
+# metadata, /etc/os-release comes from the installed ROOTFS. Seeing both
+# change together is what proves the payload actually landed, rather than
+# just the manifest being recorded.
 RAUC_BUNDLE_VERSION = "0.2-ota-demo"
 RAUC_BUNDLE_DESCRIPTION = "Playground A/B update bundle"
 
