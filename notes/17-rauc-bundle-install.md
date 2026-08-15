@@ -281,15 +281,61 @@ is *not* covered, and should not be forgotten:
   air is the genuinely dangerous case — a half-written bootloader is an
   unbootable board — so it normally gets its own redundancy scheme or is
   declared out of scope. Ours is declared out of scope.
-- **The slot filesystem doesn't grow to fill its partition.** RAUC writes
-  the ext4 image raw, so p3 holds a 360 MiB filesystem in a 468 MiB
-  partition. Real products either accept it or `resize2fs` from a
-  post-install hook.
+- **The slot filesystem doesn't grow to fill its partition** by default, so
+  p3 holds a 360 MiB filesystem in a 468 MiB one. Fixable in one line, not
+  with a hook as first assumed — `img_to_fs_handler` in RAUC's
+  `update_handler.c` ends with:
+  ```c
+  if (dest_slot->resize && g_strcmp0(dest_slot->type, "ext4") == 0)
+          ext4_resize_slot(dest_slot, &ierror);
+  ```
+  `resize` is a per-slot boolean in `system.conf` (default false), so
+  `resize=true` under each `[slot.rootfs.N]` runs `resize2fs` after every
+  install. Not enabled yet — it changes the image, so it belongs with the
+  next image change rather than on its own.
 - **Per-slot identity**, above.
+
+## An install is a raw block write — both edges of the same knife
+
+Worth stating plainly, because it explains two things at once.
+`img_to_fs_handler` calls `write_image_to_dev()`: the payload goes onto
+`/dev/mmcblk0p3` byte-for-byte. Not a merge, not rsync, not a package
+upgrade. Whatever was on the slot stops existing along with its filesystem.
+
+Contrast session 14: `dnf install less` merged into a running system, so
+the outcome depended on that device's history. An A/B image install has no
+such dependency — any two devices that install this bundle end up
+byte-identical regardless of what was done to them first. No configuration
+drift, which is the reason to prefer it for a fleet you can't inspect.
+
+The uncomfortable half: this is the *same* mechanism as the lost SSH host
+key. Identical operation, opposite value judgement — it erases our
+deliberate sabotage (good) and the key the device generated for itself
+(bad). You can't have one without the other. "The slot is defined entirely
+by the image" and "anything the device created for itself is gone" are one
+sentence read from two sides. So the host-key problem isn't a bug to patch;
+it's state living in the wrong place.
+
+Not touched by an install: slot A, `/data`, `/home`, the FAT boot
+partition. And `BOOT_x_LEFT` is reset via `fw_setenv` as a separate step —
+bootloader state isn't part of the image either.
+
+Practical consequence: **the fix for a bad slot is another install.** One
+`rauc install` over the broken slot restores it, mask symlink and all, with
+no physical access.
 
 ## Next
 
-- Move the dropbear host key (and audit `/etc/machine-id`) onto `/data`.
+- Move the dropbear host key (and audit `/etc/machine-id`) onto `/data` —
+  the real lesson of this session.
+- `resize=true` on both rootfs slots (see above). Bundle it with the
+  dropbear change, since both touch the image.
 - Optional, on merit and still not done: pin `boot_targets` to `mmc` —
   see the end of notes/16.
 - Phase 6: the Pi Zero W capstone.
+
+## State the Pi was left in
+
+Running slot A (0.1), healthy. Slot B holds 0.2 with `BOOT_B_LEFT=0` and a
+masked `rauc-mark-good`, so it will keep booting A indefinitely — a stable
+place to stop. One `rauc install` puts B right whenever it's wanted.
