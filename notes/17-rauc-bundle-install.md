@@ -327,9 +327,13 @@ no physical access.
 ## Next
 
 - Move the dropbear host key (and audit `/etc/machine-id`) onto `/data` —
-  the real lesson of this session.
+  the real lesson of this session. **Done in notes/18** (and note the
+  correction there: the key is generated on the first SSH *connection*, not
+  at first boot — `dropbearkey.service` is `static`).
 - `resize=true` on both rootfs slots (see above). Bundle it with the
-  dropbear change, since both touch the image.
+  dropbear change, since both touch the image. **Done in notes/18**, where
+  it turned out not to be one line: the *installing* slot also needs the
+  `resize2fs` binary and a daemon restart.
 - Optional, on merit and still not done: pin `boot_targets` to `mmc` —
   see the end of notes/16.
 - Phase 6: the Pi Zero W capstone.

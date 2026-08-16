@@ -43,7 +43,7 @@ RAUC_BUNDLE_COMPATIBLE = "${DISTRO}-${MACHINE}"
 # metadata, /etc/os-release comes from the installed ROOTFS. Seeing both
 # change together is what proves the payload actually landed, rather than
 # just the manifest being recorded.
-RAUC_BUNDLE_VERSION = "0.2-ota-demo"
+RAUC_BUNDLE_VERSION = "0.3-persistent-identity"
 RAUC_BUNDLE_DESCRIPTION = "Playground A/B update bundle"
 
 # "verity" is the modern bundle format: the payload carries a dm-verity

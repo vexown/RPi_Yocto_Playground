@@ -87,6 +87,11 @@ Phase 5 — Real-world skills (ch. 7, 10)
       Pi, booted slot B at 0.2, then forced a rollback to slot A at 0.1 by
       masking `rauc-mark-good` — counters 2→1→0→fallback, 2026-08-15
       (notes/17) — **Phase 5 complete**
+- [x] OTA follow-up: fix the state that updates were destroying — SSH host
+      key moved to `/data` via a dropbearkey drop-in, `resize=true` on both
+      slots; installed A→B→A and switched slots with no host-key change,
+      2026-08-16 (notes/18). machine-id measured as per-slot too, documented
+      but deliberately not fixed (needs an initrd).
 
 Phase 6 — CAPSTONE: real product on the Pi Zero W
 Replace Raspberry Pi OS Lite (~2 min boot) on the deployed USB serial

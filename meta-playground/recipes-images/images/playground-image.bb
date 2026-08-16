@@ -39,7 +39,24 @@ IMAGE_INSTALL = "\
     playground-pulse \
     systemd-analyze \
     rauc \
+    e2fsprogs-resize2fs \
     "
+
+# Why e2fsprogs-resize2fs is a separate line and not part of "rauc":
+#
+# Session 13 turned on `resize=true` for both slots in system.conf, so that
+# after an install the slot's filesystem grows to fill its partition instead
+# of staying the ~360 MiB Yocto built. RAUC does not do that with a library —
+# ext4_resize_slot() in src/update_handler.c builds an argv and execs the
+# `resize2fs` BINARY. If it isn't on the target, the install runs all the way
+# to 99%, writes 377 MB, and then fails with "Failed to run resize2fs".
+#
+# rauc's RDEPENDS can't help: resize is optional and per-slot, so the client
+# genuinely doesn't depend on it — whether this device needs resize2fs is a
+# fact about this device's system.conf, which is ours. That makes it an image
+# decision, and this is where image decisions go. The image already had
+# e2fsprogs-e2fsck (fstab pass=1 needs a real fsck); resize2fs ships as its
+# own package, which is exactly the kind of split you only notice by looking.
 
 # Session 9: give the image a package manager. Surprise: there isn't one
 # by default! Yocto USES a package manager (dnf, on the build host) to
