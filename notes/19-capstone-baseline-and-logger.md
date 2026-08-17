@@ -290,6 +290,48 @@ but so third-party bbappends on `core-image-minimal` cannot reach it. And
 the 1732 modules were never a default we had to fight; they arrive with a
 layer we can simply keep away from this board.
 
+### The second instance, which would have hung the board
+
+Going looking for other appends from the same layer turned up a worse one.
+`meta-rauc-raspberrypi/recipes-core/base-files/base-files_%.bbappend`:
+
+```
+FILESEXTRAPATHS:prepend:rpi := "${THISDIR}/files:"
+```
+
+`:rpi` looks like scoping, and it is — but **every** Raspberry Pi machine
+carries the `rpi` override, `raspberrypi0-wifi` included. So the layer's own
+`fstab` wins the `file://fstab` lookup, and the built Zero W rootfs contains:
+
+```
+/dev/mmcblk0p5  /data   ext4    defaults         0       0
+/dev/mmcblk0p6  /home   ext4    x-systemd.growfs 0       0
+```
+
+against a `.wic` that has exactly two partitions:
+
+```
+rpi0.wic1  *   8192  274431  266240   130M  c  W95 FAT32 (LBA)
+rpi0.wic2    278528  587365  308838 150.8M 83  Linux
+```
+
+That is the Pi 5's RAUC partition layout, on a board where we deliberately
+did not set `WKS_FILE`. Neither entry carries `nofail`, so systemd's fstab
+generator gives each a hard `Requires=` on a device unit that will never
+appear, pulled into `local-fs.target` — the device timeout (90 s by default)
+expires, `local-fs.target` fails, and boot lands in emergency.
+
+Reasoned from the config, not yet observed on hardware — the card was never
+flashed. But it means the first Zero W flash would have hung with no serial
+adapter to see why, and the natural suspicion would have been "the ARMv6
+build is broken", which it is not.
+
+Two takeaways beyond the specific bug. First, `:rpi` is a *machine family*
+override, not a machine: reading it as "this only affects the Pi I set this
+layer up for" is exactly the wrong inference. Second, the failure mode of a
+misapplied bbappend is not a build error — both of these built cleanly. It
+is a working artifact that is quietly wrong for the board it was built for.
+
 ## 6. Verified on target
 
 Tested on the **Pi 5**, deliberately — it is already running, already
@@ -343,6 +385,15 @@ immediately after trigger can legitimately show nothing.
 
 - **Own image recipe for the Zero W** — immune to `core-image-minimal`
   bbappends, explicit about the four kernel modules it needs.
+- **Deal with the fstab before the first flash.** An image recipe does not
+  fix it: `base-files_%.bbappend` is scoped `:rpi`, so it applies whatever
+  the image is called. Options, in rough order of preference: our own
+  `base-files` bbappend at higher `BBFILE_PRIORITY` shipping a Zero W fstab;
+  a `BBMASK` on that bbappend for the rpi0 build (the same tool already used
+  against `rauc-conf.bbappend` in session 11); or give the Zero W the
+  partitions the fstab expects, which is the tail wagging the dog. Whatever
+  we choose, **check `/etc/fstab` in the built rootfs before flashing** —
+  that one `cat` would have caught this.
 - **Networking, and where the PSK lives.** The repo is public, so no
   credential can be tracked. Options: place `wpa_supplicant.conf` on the
   card after flashing (the workflow we already used for the SSH key), read
