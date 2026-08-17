@@ -1,0 +1,152 @@
+# local.conf.rpi0 — build configuration for the Pi Zero W capstone.
+#
+# Second build config, second build directory (build-rpi0). Everything in
+# phases 1-5 targeted the Pi 5; this file targets the board the whole
+# project was actually for: the deployed USB-serial logger.
+#
+# WHY A SEPARATE BUILD DIRECTORY AT ALL
+# BitBake can build several MACHINEs out of one build dir — work and sstate
+# are keyed by architecture, so they don't collide. But local.conf is a
+# single file per build dir, and almost every line of local.conf.rpi5 is a
+# statement about the Pi 5 (dual-slot wic layout, RAUC signing keys, an LED
+# overlay on GPIO17, a package feed reachable over an ethernet cable the
+# Zero W does not have). Sharing one file would mean guarding half of it
+# with :append:raspberrypi5 overrides for no benefit. Two build dirs, two
+# local.confs, ONE shared bblayers.conf and ONE shared cache — that's the
+# split that matches reality.
+#
+# Use it with:  source scripts/setup-yocto.sh rpi0
+
+# --- The machine ------------------------------------------------------------
+# raspberrypi0-wifi = the original 2017 Pi Zero W. BCM2835: a SINGLE
+# ARM1176JZF-S core at 1 GHz, 512 MB RAM. That is ARMv6 — an architecture
+# from 2002, older than the ARMv7 the book's examples assume and two whole
+# generations behind the Pi 5's Cortex-A76 (ARMv8.2-A, 4 cores, 4-8 GB).
+#
+# DO NOT confuse it with `raspberrypi0-2w`, which is the 2021 Zero 2 W: same
+# form factor, same price bracket, completely different silicon (BCM2710,
+# quad-core ARMv8). Picking the wrong one produces an image that builds
+# perfectly and does not boot.
+#
+# The tune is set by the machine conf as DEFAULTTUNE = "arm1176jzfshf"
+# (the `hf` = hard-float ABI: floating-point arguments in VFP registers).
+# That single word is why this build is expensive — see DL_DIR/SSTATE_DIR.
+MACHINE = "raspberrypi0-wifi"
+
+# --- Shared caches: one of them helps a lot, one of them barely helps -------
+# DL_DIR holds upstream source tarballs and git mirrors. Source code has no
+# architecture, so this is ~100% reuse: the Zero W build downloads almost
+# nothing we don't already have from four months of Pi 5 builds.
+#
+# SSTATE_DIR holds the OUTPUT of build tasks, and shared state is keyed by a
+# hash that includes the target architecture. For every target recipe the
+# ARMv6 hash differs from the ARMv8 one, so there is no hit and the package
+# is rebuilt from source. What DOES get reused is everything in the
+# x86_64-linux "native" and "cross" namespaces — the compilers, quilt,
+# pseudo, python, cmake, the whole host-side toolchain — which is a real
+# chunk of a from-scratch build.
+#
+# Net effect: expect this first build to take HOURS, not the minutes recent
+# Pi 5 rebuilds took. It is the first time in this project that TUNE stops
+# being an abstract variable and turns into wall-clock time.
+DL_DIR = "/media/blankmcu/EmbeddedLinux/yocto/downloads"
+SSTATE_DIR = "/media/blankmcu/EmbeddedLinux/yocto/sstate-cache"
+
+# --- Distro: the payoff of session 8 ----------------------------------------
+# playground.conf said, back when we wrote it, that policy belongs in a
+# distro conf precisely so that "the capstone build will be the SAME
+# playground distro, different MACHINE". This is that line coming due. We
+# get INIT_MANAGER = "systemd", the identity in /etc/os-release, and the
+# rauc DISTRO_FEATURE, without restating any of it.
+#
+# Honest caveat to revisit AFTER we measure: systemd on a single 1 GHz
+# ARMv6 core is not obviously the right init for a 10-15 s boot target, and
+# the rauc feature drags dm-verity/squashfs/loop/nbd into the kernel config
+# for an image that (so far) has no A/B layout to use them with. Both are
+# real levers. Neither gets pulled before there is a measurement to justify
+# it — that is the whole method of this phase.
+DISTRO = "playground"
+PACKAGE_CLASSES = "package_rpm"
+
+# --- Serial console ---------------------------------------------------------
+# Non-negotiable for boot-time work: you cannot optimise a boot you cannot
+# see, and a Zero W has no ethernet to SSH in over while it is still booting.
+#
+# ENABLE_UART = "1" does two things, in two different recipes:
+#   * rpi-config_git.bb writes `enable_uart=1` into config.txt
+#   * rpi-cmdline.bb adds `console=serial0,115200` to cmdline.txt
+#     (CMDLINE_SERIAL is guarded by exactly this variable)
+#
+# Board-specific gotcha worth knowing on the Zero W specifically: the chip
+# has two UARTs, and the good one (PL011, ttyAMA0) is wired to the Bluetooth
+# controller. What comes out on GPIO14/15 is therefore the "mini UART"
+# (ttyS0) — which derives its baud rate from the VPU core clock, so
+# enable_uart=1 also PINS core_freq to 250 MHz to stop the baud rate drifting
+# when the clock scales. That is a small, permanent performance cost paid for
+# console visibility. The machine conf agrees: SERIAL_CONSOLES = "115200;ttyS0".
+#
+# Any 3.3 V USB-serial adapter works — and building a USB serial logger means
+# you almost certainly own several. GND->pin 6, RX->pin 8 (GPIO14 TX),
+# TX->pin 10 (GPIO15 RX). Do NOT connect the adapter's 5 V line.
+ENABLE_UART = "1"
+
+# Deliberately NOT setting `CMDLINE:append = " console=tty1"` the way the
+# Pi 5 config does. That line existed to get boot logs onto an HDMI screen;
+# this board is headless, and every extra console is another sink the kernel
+# writes every message to synchronously. Console output on a slow link is a
+# genuine, measurable part of boot time on hardware this size — which is why
+# "quiet boot" is a later checkbox and not something to pre-emptively do now.
+
+# --- Image conveniences (development only) ----------------------------------
+# Same two as the Pi 5 build, same reasoning: passwordless root and an SSH
+# server so the board is reachable. `?=` so that a "real" build of the same
+# image recipe elsewhere gets neither.
+#
+# Note this does not yet get us onto WiFi — dropbear listening on a board
+# with no network configured is a server nobody can reach. The first build's
+# job is "does ARMv6 boot, and how fast", answered over the serial console.
+# WiFi (wpa-supplicant + the bcm43430 firmware the machine conf RRECOMMENDS)
+# lands in the next step, once there is a baseline to compare against.
+EXTRA_IMAGE_FEATURES ?= "debug-tweaks ssh-server-dropbear"
+
+# --- What is deliberately absent, and why -----------------------------------
+# Read this list next to local.conf.rpi5; the differences are the design.
+#
+# RPI_USE_U_BOOT   — not set, so the Pi firmware loads the kernel directly.
+#                    That removes an entire stage from the boot path. U-Boot
+#                    earned its place on the Pi 5 because A/B slot selection
+#                    needs a writable environment; here, boot time is the
+#                    product requirement and nothing needs a bootloader yet.
+# WKS_FILE         — stock single-rootfs layout. No A/B on this board (yet);
+#                    Phase 6's durability answer is a READ-ONLY rootfs, which
+#                    solves the "yanked power corrupts the card" problem
+#                    without doubling the image.
+# IMAGE_FSTYPES    — no bare ext4 needed; there is no bundle to build.
+# RAUC_KEY_FILE /
+# RAUC_CERT_FILE /
+# BBMASK           — all RAUC bundle-signing machinery. Not building bundles.
+# PACKAGE_FEED_URIS— 10.42.0.1:8000 is this PC on the pi-share ETHERNET cable.
+#                    The Zero W has no ethernet port, so that URL is simply
+#                    false here. If we want a feed later it needs an address
+#                    the board can actually reach (WiFi, or USB gadget
+#                    networking — see CMDLINE_RNDIS in rpi-cmdline.bb, which
+#                    turns the Zero's OTG port into a network interface over
+#                    the same cable that powers it).
+# RPI_EXTRA_CONFIG /
+# RPI_EXTRA_IMAGE_BOOT_FILES /
+# do_image_wic[depends]
+#                  — the GPIO17 LED overlay from session 6. Pi 5 teaching
+#                    hardware, not part of this product.
+
+# --- Housekeeping -----------------------------------------------------------
+# Same disk-space guard as the Pi 5 build; a second build dir on the same
+# 250 GB image makes this more relevant, not less.
+BB_DISKMON_DIRS ??= "\
+    STOPTASKS,${TMPDIR},1G,100K \
+    STOPTASKS,${DL_DIR},1G,100K \
+    STOPTASKS,${SSTATE_DIR},1G,100K \
+    HALT,${TMPDIR},100M,1K \
+    HALT,${DL_DIR},100M,1K \
+    HALT,${SSTATE_DIR},100M,1K"
+
+CONF_VERSION = "2"

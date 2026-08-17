@@ -1,0 +1,99 @@
+# serial-logger@.service — one logger instance per serial device.
+#
+# The "@" makes this a TEMPLATE unit. It is never started directly; systemd
+# instantiates it, and whatever follows the @ in the instance name becomes
+# %i inside. Start serial-logger@ttyACM0.service and %i is "ttyACM0".
+#
+# Nothing enables this. 99-serial-logger.rules asks udev to pull in the
+# right instance when a USB serial device appears, which is why there is no
+# [Install] section — see the rule for the other half of the mechanism.
+#
+# This replaces a unit that was, in full:
+#     After=network.target
+#     ExecStart=/usr/bin/python3 /home/blankmcu/serial_logger.py
+#     Restart=always
+#     RestartSec=3
+# ...which ordered a USB reader behind a 43-second WiFi wait, hardcoded
+# /dev/ttyUSB0 inside the script, and crash-looped forever when that node
+# did not exist. All three are structural, and all three die here.
+
+[Unit]
+Description=USB serial logger on /dev/%i
+
+# The dependency that actually matters. Every device udev knows about has a
+# .device unit; systemd derives the name by escaping the path, so
+# /dev/ttyACM0 becomes dev-ttyACM0.device — which is exactly "dev-%i.device"
+# for instance ttyACM0.
+#
+#   After=   ordering: don't start until the node exists.
+#   BindsTo= lifetime: when the device goes away, STOP this instance.
+#
+# BindsTo is the line that replaces Restart=always. Unplugging the adapter
+# used to mean "process dies, systemd respawns it 3 s later, it dies again,
+# forever" — with an error line flushed to the SD card on every lap. Now
+# unplugging simply stops the unit, and replugging starts a fresh one.
+BindsTo=dev-%i.device
+After=dev-%i.device
+
+# The start limiter, made explicit rather than left to the defaults (5 tries
+# per 10 s). Three failures in a minute and systemd gives up until something
+# resets it — a hard backstop against ever reproducing the old crash loop.
+# These are [Unit] directives, not [Service]: they moved sections in systemd
+# 229 and a surprising amount of copy-pasted config on the internet still
+# has them in the wrong place, where they are silently ignored.
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+# Note what is NOT here: network.target. This program reads a USB device.
+# It never touches a socket. Ordering it behind the network was the single
+# most expensive wrong line in the old unit.
+
+[Service]
+# Type=exec: systemd considers the service started once execve() has
+# succeeded, so a missing or non-executable binary is reported as a start
+# failure rather than a silent instant exit. (Type=simple, the older
+# default, calls it "started" the moment it forks — before it knows.)
+Type=exec
+
+# Session 13's idiom, reused: Environment= FIRST, EnvironmentFile= SECOND.
+# systemd applies them in order, so the file wins where it sets a variable
+# and these remain the fallback where it doesn't. The "-" prefix means "not
+# an error if absent", so the unit still works on an image without the
+# config file at all.
+Environment=LOGGER_BAUD=115200
+Environment=LOGGER_DIR=/var/log/serial-logger
+EnvironmentFile=-/etc/default/serial-logger
+
+ExecStart=/usr/bin/serial-logger /dev/%i ${LOGGER_BAUD} ${LOGGER_DIR}
+
+# LogsDirectory creates /var/log/serial-logger (0755, before ExecStart) and
+# — the part that matters — automatically marks it writable even under
+# ProtectSystem=strict below. Doing it this way means no ReadWritePaths= to
+# keep in sync with the path we actually log to.
+LogsDirectory=serial-logger
+
+# Restart policy, deliberately narrow. The old Restart=always turned "the
+# device is not there" into an infinite loop. Here BindsTo= already handles
+# device presence, so a restart only makes sense for a genuine transient
+# failure — and systemd's start limiter stops even that after three tries
+# in a minute, instead of hammering the card until someone notices.
+Restart=on-failure
+RestartSec=5
+
+# Cheap hardening. The program opens exactly two things: a tty and a file
+# under /var/log. Nothing else needs to be reachable.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+# Runs as root for now, because it needs the tty and this image has no
+# unprivileged user. The tidier answer is a dedicated user (useradd.bbclass)
+# plus GROUP="serial-logger" on the udev rule — worth doing, not worth
+# blocking the first measurement on.
+
+# There is deliberately no [Install] section — not even an empty one, which
+# would flip the unit's state from "static" to "disabled" and imply there is
+# something to enable. udev decides when this runs; there is nothing for
+# `systemctl enable` to do, and the recipe sets SYSTEMD_AUTO_ENABLE = "disable"
+# to say so. If you ever want an instance pinned to a fixed adapter
+# regardless of udev, that is what a WantedBy= plus DefaultInstance= is for.

@@ -97,10 +97,22 @@ Phase 6 — CAPSTONE: real product on the Pi Zero W
 Replace Raspberry Pi OS Lite (~2 min boot) on the deployed USB serial
 logger with a purpose-built image (target: boot to working SSH + logging
 in ~10-15 s):
-- [ ] Second build config: MACHINE=raspberrypi0-wifi (ARMv6)
-- [ ] Baseline: measure current Pi OS boot (systemd-analyze blame/critical-chain)
-- [ ] Minimal image: busybox + sysvinit + dropbear + wpa_supplicant + WiFi firmware
-- [ ] Recipe for the USB serial logger (udev rule + script, ftdi/cp210x/ch341 modules)
+- [x] Second build config: MACHINE=raspberrypi0-wifi (ARMv6) — `build-rpi0`,
+      `conf-templates/local.conf.rpi0`, `setup-yocto.sh` takes a target
+      argument; `core-image-minimal` built 2026-08-17 (notes/19)
+- [x] Baseline: measure current Pi OS boot — **86.9 s** (12.4 s kernel +
+      74.5 s userspace), of which `NetworkManager` alone is 43.0 s, 2026-08-17
+      (notes/19). Measuring also found the deployed logger crash-looping on a
+      hardcoded `/dev/ttyUSB0` and burning 100% of the core on a busy-wait.
+- [ ] Minimal image: its own recipe (not `core-image-minimal` — a
+      meta-rauc-community bbappend reaches that name and adds 1732 kernel
+      modules), dropbear + wpa_supplicant + WiFi firmware, four named USB
+      serial modules. Note: **systemd, not sysvinit** as originally planned —
+      the logger's udev/`BindsTo=` device activation depends on it.
+- [x] Recipe for the USB serial logger — `meta-playground/recipes-apps/serial-logger`,
+      rewritten in C (9.6 KB binary), udev rule instantiates a systemd
+      template unit per device, `BindsTo=` replaces the crash loop; verified
+      on the Pi 5 2026-08-17 (notes/19)
 - [ ] Measure, then optimize: trim kernel config, quiet boot, static IP option
 - [ ] Read-only rootfs so yanking power can't corrupt the SD card
 

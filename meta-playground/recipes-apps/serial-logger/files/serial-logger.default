@@ -1,0 +1,29 @@
+# /etc/default/serial-logger — runtime settings for serial-logger@.service.
+#
+# Read via EnvironmentFile= in the unit, which is parsed AFTER the unit's own
+# Environment= lines, so anything set here overrides the built-in defaults.
+# Everything is commented out below, which means the defaults apply; the file
+# exists so that changing the baud rate on a deployed box is an edit and a
+# `systemctl restart`, not an image rebuild.
+#
+# systemd parses this as a simple KEY=value list, NOT as shell. There is no
+# command substitution, no variable expansion, no `export`. Quotes are
+# stripped, but that is the extent of it.
+
+# Line speed of the device being logged. Must be one of the rates in
+# baud_to_speed() in serial-logger.c: 9600, 19200, 38400, 57600, 115200,
+# 230400, 460800, 921600. Anything else is rejected at startup with a clear
+# message rather than being silently rounded.
+#LOGGER_BAUD=115200
+
+# Where session logs are written. If you change this, change LogsDirectory=
+# in the unit to match — that is what creates the directory and makes it
+# writable under ProtectSystem=strict. A path outside /var/log will need
+# ReadWritePaths= adding instead.
+#LOGGER_DIR=/var/log/serial-logger
+
+# NOTE: this applies to every instance. Per-device settings (one adapter at
+# 9600, another at 115200) would be a drop-in on the specific instance:
+#   /etc/systemd/system/serial-logger@ttyUSB0.service.d/baud.conf
+# containing [Service] and Environment=LOGGER_BAUD=9600. systemd merges
+# drop-ins for a concrete instance on top of the template.

@@ -1,0 +1,51 @@
+# 99-serial-logger.rules — start a logger for every USB serial device.
+#
+# This is the half of the mechanism that decides WHEN serial-logger@.service
+# runs. udev sees the device appear, tags it, and names the service instance
+# after the kernel's own name for the node. No polling, no hardcoded path,
+# no service sitting in a retry loop waiting for hardware to show up.
+#
+# Why "99-": udev processes rules files in lexical order across all its
+# directories, and the convention is that low numbers set things up
+# (persistent names, permissions) and high numbers act on the result. Ours
+# acts, so it goes late.
+#
+# THE MATCH, term by term:
+#
+#   SUBSYSTEM=="tty"
+#       The device we are being asked about is a serial port. Note the
+#       singular: SUBSYSTEM is the device's OWN subsystem.
+#
+#   SUBSYSTEMS=="usb"
+#       Plural, and this is the load-bearing one. SUBSYSTEMS walks UP the
+#       device's parent chain and matches if ANY ancestor is a USB device.
+#       That is what separates a USB adapter's port from the Pi's own
+#       on-board UART: ttyS0 and ttyAMA0 hang off the SoC's platform bus,
+#       have no USB ancestor, and so are never matched. Without this term
+#       we would cheerfully start a logger on the serial console and record
+#       the boot messages into themselves.
+#
+#       Matching by ancestry rather than by driver is also why this needs no
+#       maintenance: ftdi_sio, cp210x, ch341, cdc_acm and whatever ships next
+#       year all produce a tty under a USB parent. The deployed script only
+#       knew about /dev/ttyUSB*, which is why plugging in a CDC-ACM device
+#       (a Pico Debugprobe — /dev/ttyACM0) broke it.
+#
+# THE ACTIONS:
+#
+#   TAG+="systemd"
+#       Ask udev to expose this device to systemd as a .device unit. Without
+#       the tag there is no dev-ttyACM0.device for the service's BindsTo= to
+#       attach to, and SYSTEMD_WANTS is ignored.
+#
+#   ENV{SYSTEMD_WANTS}+="serial-logger@%k.service"
+#       %k is the kernel name of the device — "ttyACM0", "ttyUSB0". systemd
+#       reads this property off the device unit and starts the named service
+#       as if the device unit had Wants= on it. "+=" appends, so we coexist
+#       with any other rule wanting its own service on the same device.
+#
+# Plug in two adapters and you get two independent instances, each with its
+# own log file. The single-global-PORT design could not do that at all.
+
+SUBSYSTEM=="tty", SUBSYSTEMS=="usb", TAG+="systemd", \
+    ENV{SYSTEMD_WANTS}+="serial-logger@%k.service"
