@@ -420,8 +420,10 @@ immediately after trigger can legitimately show nothing.
   running Raspberry Pi OS Lite, still the product. Its `serial-logger.service`
   is still crash-looping — deliberately not fixed in place, because it is
   being replaced.
-- Full `dd` image of that card belongs in
-  `/media/blankmcu/EmbeddedLinux/backups/` before anything else happens to it.
+- Full `dd` image of that card taken before anything else touched it:
+  `/media/blankmcu/EmbeddedLinux/backups/rpi0-pios-lite-2026-08-17.img.gz`
+  (888 MB gzipped). That is the rollback point for the whole capstone — if
+  the Yocto image never works out, the product comes back with one `dd`.
 - Pi 5: `serial-logger` and `kernel-module-cdc-acm` installed from the feed
   at runtime. Not in any image recipe — they vanish on the next reflash,
   which is fine, they were a test.
