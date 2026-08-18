@@ -1,0 +1,60 @@
+# fstab for raspberrypi0-wifi — the Pi Zero W serial logger.
+#
+# This file exists to REPLACE meta-rauc-raspberrypi's fstab, which the
+# ":rpi" family override would otherwise apply to this board. See the
+# bbappend two directories up for the full story and for why a
+# machine-named directory beats a priority bump.
+#
+# The card this describes has exactly two partitions, which is what
+# meta-raspberrypi's default sdimg .wks produces:
+#
+#   /dev/mmcblk0p1   vfat   the firmware/boot partition (bootcode, start.elf,
+#                           config.txt, cmdline.txt, kernel.img, dtbs)
+#   /dev/mmcblk0p2   ext4   the root filesystem
+#
+# There is no /data and no /home partition, because there is no A/B layout
+# on this board. The Zero W is a single-slot device: it gets reflashed, not
+# updated over the air. (RAUC is a Pi 5 exercise from phase 5; deliberately
+# absent here — see local.conf.rpi0's "what is absent, and why" block.)
+
+# The root filesystem. "/dev/root" is resolved by the kernel from the
+# root= it was booted with, so this line stays correct no matter which
+# partition the bootloader handed us. pass=1 means fsck checks it first,
+# which is why the image ships e2fsprogs-e2fsck.
+/dev/root            /                    auto       defaults              1  1
+
+# The kernel's own virtual filesystems. systemd would mount these anyway
+# via its built-in API-filesystem logic, but naming them keeps the file
+# self-describing and works if init is ever something else.
+proc                 /proc                proc       defaults              0  0
+devpts               /dev/pts             devpts     mode=0620,ptmxmode=0666,gid=5      0  0
+tmpfs                /run                 tmpfs      mode=0755,nodev,nosuid,strictatime 0  0
+
+# /var/volatile is poky's RAM-backed scratch area. /var/lib, /var/cache,
+# /var/spool and /srv are bind-mounted onto it by volatile-binds (whose
+# units 98-volatile-binds.preset enables), and by DEFAULT /var/log is a
+# symlink into it too.
+#
+# /var/log is the exception on this board: local.conf.rpi0 sets
+# VOLATILE_LOG_DIR = "no", so /var/log is a real directory on the root
+# filesystem. That is deliberate and load-bearing — the serial logger's
+# unit declares LogsDirectory=serial-logger, so it writes to
+# /var/log/serial-logger, and a logger whose logs are in RAM is not a
+# logger. See the long note in local.conf.rpi0.
+tmpfs                /var/volatile        tmpfs      defaults              0  0
+
+# The firmware partition, mounted so config.txt and cmdline.txt can be
+# edited from a running system without pulling the card.
+#
+# "nofail" is the whole lesson of this file expressed as a mount option.
+# Without it, a missing or unreadable partition is a BOOT FAILURE: the
+# .mount unit fails, local-fs.target fails, and systemd drops to an
+# emergency shell after waiting out the 90 s device timeout. With nofail,
+# the mount is best-effort and boot continues. On a headless board with
+# no serial console attached, "boots without /boot" beats "does not boot".
+#
+# Not read-only yet, though it is a candidate: this is a card that gets
+# its power yanked, and a writable FAT is the most corruptible thing on
+# it. That belongs with the read-only-rootfs work, where the same argument
+# gets made about / — one decision, made once, with numbers.
+/dev/mmcblk0p1       /boot                vfat       defaults,nofail       0  0

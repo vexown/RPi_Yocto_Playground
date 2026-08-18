@@ -1,0 +1,47 @@
+# 20-wlan0.network — systemd-networkd config for the Zero W's WiFi.
+#
+# This is the replacement for the 43.0 seconds NetworkManager was costing
+# on the Raspberry Pi OS baseline. systemd-networkd is already in the
+# image (it ships inside the systemd package and upstream's
+# 90-systemd.preset enables it), so switching costs zero extra bytes.
+#
+# Division of labour, which trips people up: networkd does NOT do WiFi.
+# It configures LAYER 3 — addresses, routes, DNS. Getting wlan0 associated
+# and authenticated with the access point is layer 2, and that is
+# wpa_supplicant's job, running as wpa_supplicant@wlan0.service. The two
+# don't talk to each other; networkd just watches the interface come up
+# carrier-wise and then does its part.
+#
+# Filename: the leading number is a sort key. networkd reads
+# /etc/systemd/network/, /run/systemd/network/ and
+# /usr/lib/systemd/network/ as one merged set sorted by filename, and the
+# FIRST file whose [Match] matches an interface wins outright. poky's
+# systemd-conf ships 80-wired.network (Name=en* eth*), so "20-" is
+# comfortably ahead of it — and it wouldn't match wlan0 anyway.
+
+[Match]
+Name=wlan0
+
+[Network]
+# The home router hands out the address. A static address is a real
+# option for this product (it removes the DHCP round-trip from the boot
+# critical path, and it means the logger is always at a known address),
+# and it is on the optimize list — but it belongs there, after
+# measurement, not as an untested assumption.
+DHCP=ipv4
+
+# No IPv6 link-local autoconfiguration. This board talks to one thing on
+# one LAN. Leaving it on means networkd generates an fe80:: address and
+# waits on duplicate-address detection for it, which is pure latency on
+# the path to "reachable over ssh".
+LinkLocalAddressing=no
+
+[DHCPv4]
+# Take DNS and the default route from the router, but NOT the hostname.
+# The hostname is this device's identity and comes from the image
+# (base-files, defaulting to the MACHINE name); letting a DHCP server
+# rename our appliance is the kind of surprise that makes a field unit
+# hard to find.
+UseDNS=yes
+UseRoutes=yes
+UseHostname=no

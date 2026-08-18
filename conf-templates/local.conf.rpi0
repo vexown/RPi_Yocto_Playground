@@ -109,6 +109,42 @@ ENABLE_UART = "1"
 # lands in the next step, once there is a baseline to compare against.
 EXTRA_IMAGE_FEATURES ?= "debug-tweaks ssh-server-dropbear"
 
+# --- Where the logs live ----------------------------------------------------
+# VOLATILE_LOG_DIR defaults to "yes" (bitbake.conf:91), and that default is
+# wrong for THIS product in a way that is easy to miss until the first
+# reboot loses a week of captures.
+#
+# With the default, base-files does not create a real /var/log at all — it
+# creates /var/volatile/log and systemd's tmpfiles drops a symlink
+# /var/log -> /var/volatile/log (systemd_255.21.bb:314). /var/volatile is a
+# tmpfs, per the fstab. So the serial logger, whose unit says
+# LogsDirectory=serial-logger and therefore writes to
+# /var/log/serial-logger, would be writing to RAM. It works perfectly,
+# fills up, and evaporates on the next power cycle.
+#
+# The device it replaces wrote to ~/logs on the SD card and kept months of
+# sessions. Shipping a "better" image that silently stops keeping logs is
+# not an upgrade, so: "no", which makes /var/log a real directory on the
+# root filesystem. It also swaps FILESYSTEM_PERMS_TABLES to
+# files/fs-perms-persistent-log.txt so the permissions come out right.
+#
+# One line, and it is the whole reason the logger's unit needs no
+# machine-specific override: LogsDirectory= and ProtectSystem=strict keep
+# working unchanged, because the PATH did not move — only what is behind
+# it. Pointing LOGGER_DIR at some other partition would have meant adding
+# a ReadWritePaths= to the unit, and a unit that differs per board is a
+# unit that gets out of sync.
+#
+# Watch for on first boot: with a real /var/log, systemd ships a
+# /var/log/journal directory, and journald's default Storage=auto persists
+# whenever that directory exists. So the SYSTEM journal becomes persistent
+# too. For a field logger that is arguably a feature (post-mortem after a
+# power cut survives), but it is unbounded SD wear if left alone —
+# SystemMaxUse= or Storage=volatile is the knob. Deliberately not set yet:
+# measure first, and `journalctl --disk-usage` after a few days is the
+# measurement.
+VOLATILE_LOG_DIR = "no"
+
 # --- What is deliberately absent, and why -----------------------------------
 # Read this list next to local.conf.rpi5; the differences are the design.
 #

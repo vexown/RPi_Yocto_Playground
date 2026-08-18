@@ -1,0 +1,66 @@
+# EXAMPLE ONLY — this file is not read by anything.
+#
+# wpa_supplicant@wlan0.service starts:
+#
+#     /usr/sbin/wpa_supplicant -c/etc/wpa_supplicant/wpa_supplicant-wlan0.conf -iwlan0
+#
+# Note the path: /etc/wpa_supplicant/wpa_supplicant-<iface>.conf, which is
+# NOT the /etc/wpa_supplicant.conf that the wpa-supplicant package ships.
+# The per-interface path is what the templated unit derives from %I, and
+# the two files have nothing to do with each other.
+#
+# THE REAL FILE IS NOT IN THIS REPOSITORY AND NEVER WILL BE.
+# This repo is public. A PSK committed once is a PSK leaked forever — git
+# history keeps it after the "fix" commit, and GitHub keeps unreachable
+# objects served by SHA. Rotating the network's password is the only real
+# remedy, so the file simply never gets written here.
+#
+# To provision a freshly flashed card:
+#
+#     ./scripts/provision-card.sh /dev/sdX
+#
+# which copies the real file from an untracked directory outside the repo
+# (default ~/.rpi0-secrets/) onto the card's rootfs with mode 0600. Write
+# the real file once, keep it out of the repo, reuse it on every reflash.
+#
+# --------------------------------------------------------------------------
+# Format for a normal WPA2 home network (PSK — one shared password):
+
+ctrl_interface=/var/run/wpa_supplicant
+# GROUP=wheel would let a non-root user drive wpa_cli. Not needed here.
+
+# Let wpa_supplicant rewrite this file when the network list changes
+# (e.g. via wpa_cli). Off: this is an appliance with one network, and a
+# daemon that rewrites its own config is a daemon that can corrupt it on
+# a power cut.
+update_config=0
+
+country=PL
+
+network={
+    ssid="YourNetworkName"
+
+    # Two ways to give the password:
+    #
+    #   psk="plaintext password here"      <- quoted: the passphrase itself
+    #   psk=64hexdigits...                 <- unquoted: the derived key
+    #
+    # The hex form is produced by:  wpa_passphrase "SSID" "password"
+    # It is NOT more secure — it is password-equivalent, anyone holding it
+    # can join the network. What it does buy is that the human-memorable
+    # password (likely reused elsewhere) never sits on the SD card, and
+    # that the Zero W skips the PBKDF2 key derivation at every boot, which
+    # on a 1 GHz ARM11 is not nothing.
+    psk=0000000000000000000000000000000000000000000000000000000000000000
+
+    # Optional: pin the AP by MAC if the SSID is shared by several.
+    #bssid=aa:bb:cc:dd:ee:ff
+
+    # Optional: prefer this network if several are configured.
+    #priority=10
+}
+
+# For 802.1X / WPA-Enterprise (per-user credentials against a RADIUS
+# server) the block looks completely different — key_mgmt=WPA-EAP, eap=,
+# identity=, ca_cert=. Not what this device uses; noted so the difference
+# is on the record.

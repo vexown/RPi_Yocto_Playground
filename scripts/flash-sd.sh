@@ -1,16 +1,34 @@
 #!/bin/bash
 # Flash the latest Yocto image onto an SD card.
 #
-# Usage:  ./scripts/flash-sd.sh /dev/sdX [image-name]
+# Usage:  ./scripts/flash-sd.sh /dev/sdX [rpi5|rpi0] [image-name]
 #         (find your SD card device with `lsblk -d -o NAME,SIZE,TRAN,MODEL`)
-# image-name defaults to playground-image (our own image recipe);
-# pass e.g. core-image-minimal to flash the stock one instead.
+#
+#   rpi5 (default) -> build-rpi5, MACHINE=raspberrypi5,      playground-image
+#   rpi0           -> build-rpi0, MACHINE=raspberrypi0-wifi, rpi0-logger-image
+#
+# Session 14 gave us a second build directory, so this script can no longer
+# assume which one it is flashing from. The target argument mirrors
+# setup-yocto.sh's, deliberately: one vocabulary for both scripts.
+#
+# Backwards compatible: if the second argument is not "rpi5"/"rpi0" it is
+# treated as an image name against the rpi5 build, which is how every note
+# up to session 13 invokes this script.
 #
 # What a .wic image is: a complete, already-partitioned disk image.
 # So we write it to the *whole device* (/dev/sdX), not a partition (/dev/sdX1).
 #
-# Session 11 changed the layout (WKS_FILE in local.conf). It used to be two
-# partitions; the A/B update scheme needs five:
+# The partition layout depends on the target.
+#
+# rpi0 uses meta-raspberrypi's stock sdimage-raspberrypi.wks: just two
+# partitions, p1 (FAT32 boot) and p2 (ext4 root). Single-slot appliance,
+# reflashed rather than updated. NOTE that a rootfs built for it still
+# needs the fstab fix in meta-playground/recipes-core/base-files — the
+# rauc layer's fstab demands p5 and p6 across the whole ":rpi" family and
+# would strand this two-partition card in an emergency shell.
+#
+# rpi5: session 11 changed the layout (WKS_FILE in local.conf). It used to
+# be two partitions; the A/B update scheme needs five:
 #   p1 (FAT32, "boot"): GPU firmware, config.txt, cmdline.txt, the kernel
 #       (as Image), device tree blobs/overlays — and now U-Boot plus its
 #       compiled boot script and its environment block. Shared by both
@@ -24,12 +42,24 @@
 # gets past four entries, and wic numbers the logical ones from 5.)
 set -e
 
-IMAGE_DIR="/media/blankmcu/EmbeddedLinux/yocto/build-rpi5/tmp/deploy/images/raspberrypi5"
-IMAGE_NAME="${2:-playground-image}"
-# The unversioned name is a symlink that always points at the latest build.
-IMAGE="$IMAGE_DIR/$IMAGE_NAME-raspberrypi5.rootfs.wic.bz2"
-
 DEVICE="$1"
+
+# Decide which build directory we are flashing from. "rpi5"/"rpi0" in $2
+# selects a target; anything else in $2 is a legacy image name.
+case "${2:-}" in
+    rpi0)       TARGET="rpi0"; IMAGE_NAME="${3:-rpi0-logger-image}" ;;
+    rpi5)       TARGET="rpi5"; IMAGE_NAME="${3:-playground-image}" ;;
+    ""|*)       TARGET="rpi5"; IMAGE_NAME="${2:-playground-image}" ;;
+esac
+
+case "$TARGET" in
+    rpi5) MACHINE="raspberrypi5" ;;
+    rpi0) MACHINE="raspberrypi0-wifi" ;;
+esac
+
+IMAGE_DIR="/media/blankmcu/EmbeddedLinux/yocto/build-$TARGET/tmp/deploy/images/$MACHINE"
+# The unversioned name is a symlink that always points at the latest build.
+IMAGE="$IMAGE_DIR/$IMAGE_NAME-$MACHINE.rootfs.wic.bz2"
 
 if [ -z "$DEVICE" ]; then
     echo "Usage: $0 /dev/sdX"
@@ -40,6 +70,7 @@ if [ -z "$DEVICE" ]; then
 fi
 
 [ -f "$IMAGE" ] || { echo "ERROR: no image at $IMAGE — build one first."; exit 1; }
+echo ">>> Target: $TARGET  (MACHINE=$MACHINE, image=$IMAGE_NAME)"
 [ -b "$DEVICE" ] || { echo "ERROR: $DEVICE is not a block device."; exit 1; }
 
 # --- Safety rails ------------------------------------------------------------

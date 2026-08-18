@@ -24,3 +24,14 @@ private/
 # Editor noise
 *.swp
 .vscode/
+
+# --- Session 15: capstone credentials ---------------------------------------
+# The Pi Zero W's WiFi PSK is provisioned onto the card by
+# scripts/provision-card.sh, which reads it from ~/.rpi0-secrets/ — OUTSIDE
+# this repository, and the script refuses to run if SECRETS_DIR points
+# inside it. These patterns are the backstop for the obvious mistake:
+# copying the real config next to the .example to edit it. The .example
+# itself is tracked deliberately (it contains only a zeroed placeholder).
+wpa_supplicant*.conf
+!*wpa_supplicant*.conf.example
+.rpi0-secrets/

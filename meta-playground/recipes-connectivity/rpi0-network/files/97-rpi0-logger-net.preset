@@ -1,0 +1,37 @@
+# 97-rpi0-logger-net.preset — turn on the WiFi supplicant for wlan0.
+#
+# WHY A PRESET FILE AND NOT A BBAPPEND
+#
+# The unit we want enabled, wpa_supplicant@.service, is shipped by poky's
+# wpa-supplicant recipe, which deliberately sets
+# SYSTEMD_AUTO_ENABLE = "disable" — sensible, since a supplicant with no
+# config is useless and only the integrator knows the interface name.
+#
+# The obvious move is a wpa-supplicant_%.bbappend setting
+# SYSTEMD_SERVICE:${PN}:append:raspberrypi0-wifi = " wpa_supplicant@wlan0.service".
+# That works, but it makes the CONTENT of a shared package depend on the
+# machine while its PACKAGE_ARCH stays the tune arch — the sort of thing
+# that only bites you the day two machines share a tune.
+#
+# The preset file is cleaner and completely self-contained. image.bbclass
+# (line ~728) runs, on every systemd image:
+#
+#     systemctl --root=${IMAGE_ROOTFS} --preset-mode=enable-only preset-all
+#
+# as an IMAGE_PREPROCESS_COMMAND. That walks every preset file in the
+# rootfs and applies it, so a file dropped here by ANY package is honoured
+# at image-assembly time. It is exactly how systemd-networkd ends up
+# enabled in our image: upstream's own 90-systemd.preset says so.
+#
+# Numbering: presets are read in lexical order and the FIRST matching rule
+# for a unit wins. "97-" puts us ahead of poky's 98-* recipe-generated
+# presets and well ahead of 99-default.preset, which is a blanket
+# "disable *".
+#
+# One limit worth knowing before the optimize pass: "--preset-mode=
+# enable-only" means preset files can only turn things ON. You cannot
+# disable a unit this way — a "disable foo.service" line here is silently
+# ignored. When we come to strip systemd-networkd-wait-online.service and
+# friends, the tool is masking or SYSTEMD_SERVICE surgery, not this file.
+
+enable wpa_supplicant@wlan0.service
