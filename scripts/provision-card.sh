@@ -35,9 +35,16 @@
 #       board never joins the network. Format: see
 #       .../rpi0-network/files/wpa_supplicant-wlan0.conf.example
 #
-#   /home/root/.ssh/authorized_keys                 0600 root:root
+#   /root/.ssh/authorized_keys                      0600 root:root
 #       Your public key, so the board is reachable without relying on
-#       debug-tweaks' empty root password.
+#       debug-tweaks' empty root password. Note the path: /root, NOT
+#       /home/root. This script said /home/root on its first outing, which
+#       would have created a directory dropbear never looks at and failed
+#       silently with "Permission denied (publickey)". Yocto images have
+#       historically used /home/root for the root account and plenty of
+#       documentation still says so, but this image's /etc/passwd says
+#       /root and /home/root does not exist. Verify, don't remember:
+#           awk -F: '$1=="root"{print $6}' <rootfs>/etc/passwd
 #
 # Neither file's CONTENTS are ever printed by this script. Sizes and
 # fingerprints only — the point of the exercise is defeated by a terminal
@@ -142,15 +149,21 @@ echo "    ssid: $(sudo grep -oE 'ssid="[^"]*"' "$MNT/etc/wpa_supplicant/wpa_supp
 echo "    psk lines present: $(sudo grep -cE '^[[:space:]]*psk=' "$MNT/etc/wpa_supplicant/wpa_supplicant-wlan0.conf" || true)"
 
 echo ">>> Installing SSH public key ..."
-# Root's home in a Yocto rootfs is /home/root, not /root.
+# Read root's home out of the card's own /etc/passwd rather than hardcoding
+# it. This image says /root; other Yocto images say /home/root; guessing
+# wrong produces a key in a directory nothing reads and an SSH failure with
+# no clue in it.
+ROOT_HOME=$(awk -F: '$1=="root"{print $6}' "$MNT/etc/passwd")
+[ -n "$ROOT_HOME" ] || { echo "ERROR: no root entry in the card's /etc/passwd"; exit 1; }
+echo "    root's home per the card's /etc/passwd: $ROOT_HOME"
 #
 # The permissions here are load-bearing, and this is exactly what cost time
 # on the Pi OS card in session 14: an SSH server silently ignores an
 # authorized_keys whose ownership or mode is too loose (OpenSSH calls this
 # StrictModes; dropbear checks the same things and is equally quiet about
 # it). You get "Permission denied (publickey)" and no explanation anywhere.
-sudo install -d -m 0700 -o 0 -g 0 "$MNT/home/root/.ssh"
-sudo install -m 0600 -o 0 -g 0 "$PUBKEY" "$MNT/home/root/.ssh/authorized_keys"
+sudo install -d -m 0700 -o 0 -g 0 "$MNT$ROOT_HOME/.ssh"
+sudo install -m 0600 -o 0 -g 0 "$PUBKEY" "$MNT$ROOT_HOME/.ssh/authorized_keys"
 echo "    key: $(ssh-keygen -l -f "$PUBKEY" | awk '{print $1, $2, $4}')"
 
 echo ">>> Syncing ..."
@@ -158,7 +171,7 @@ sync
 
 echo
 echo ">>> Done. Card provisioned:"
-sudo find "$MNT/etc/wpa_supplicant" "$MNT/home/root/.ssh" -type f -printf '    %M %u:%g %p\n' \
+sudo find "$MNT/etc/wpa_supplicant" "$MNT$ROOT_HOME/.ssh" -type f -printf '    %M %u:%g %p\n' \
     | sed "s#$MNT##"
 echo
 echo "    Safe to eject and boot. The board should appear on the LAN as"

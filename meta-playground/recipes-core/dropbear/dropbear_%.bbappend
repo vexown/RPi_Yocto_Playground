@@ -53,7 +53,7 @@
 
 FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 
-SRC_URI += "file://persistent-host-key.conf"
+SRC_URI:append:raspberrypi5 = " file://persistent-host-key.conf"
 
 # Where the key lives, for BOTH units, in one line.
 #
@@ -71,7 +71,32 @@ SRC_URI += "file://persistent-host-key.conf"
 # by systemd's EnvironmentFile, not sourced by a shell. (It is also sourced
 # by the sysvinit script in the non-systemd case, where the same syntax is
 # still valid, so nothing breaks for a reader who switches INIT_MANAGER.)
-do_install:append() {
+# --- Session 15: everything below is scoped to the Pi 5 -----------------------
+#
+# This bbappend was written in session 13 for the Pi 5's A/B layout and left
+# UNSCOPED, which means it applied to every machine — including the Pi Zero
+# W four months later. That is the third instance this project has found of
+# a bbappend reaching a board it was never meant for, and the first one that
+# is OUR fault rather than a layer we pulled in. Worth sitting with: the
+# lesson from meta-rauc-community's core-image-minimal.bbappend and
+# base-files_%.bbappend did not automatically apply to our own code.
+#
+# What it actually did to the Zero W, checked rather than assumed: the key
+# ends up in /data/dropbear on the ROOTFS. It does not break — dropbearkey's
+# unit runs `mkdir -p ${DROPBEAR_RSAKEY_DIR}` first, /data exists as a plain
+# directory (courtesy of ANOTHER unscoped append, meta-rauc-raspberrypi's
+# `dirs755 += "/data"`), and RequiresMountsFor=/data resolves to -.mount
+# when /data is not a mount point. So: functional, but it is A/B vocabulary
+# on a board with no A/B, resting on a directory created by a layer whose
+# feature this board does not use.
+#
+# Scoped by MACHINE rather than by the "rauc-integration" override, even
+# though that override is the elegant trick playground.conf documents. It
+# would not help: the distro turns the rauc DISTRO_FEATURE on for BOTH
+# boards, so both carry the override. What actually distinguishes them is
+# having a /data PARTITION, and the only honest expression of that is the
+# machine name.
+do_install:append:raspberrypi5() {
     printf '\n# Session 13: keep the host key off the rootfs so it survives\n' \
         >> ${D}${sysconfdir}/default/dropbear
     printf '# an A/B update. See meta-playground dropbear_%%.bbappend.\n' \
@@ -101,4 +126,13 @@ do_install:append() {
 # nothing, and the build fails at do_package_qa with "installed but not
 # shipped" rather than quietly dropping the file — which is the good outcome,
 # but only if you know what the message means.
-FILES:${PN} += "${systemd_system_unitdir}/dropbearkey.service.d"
+FILES:${PN}:append:raspberrypi5 = " ${systemd_system_unitdir}/dropbearkey.service.d"
+
+# Required for the scoping above to be CORRECT rather than merely to work.
+# dropbear's PACKAGE_ARCH is normally the tune arch, so one built package is
+# shared by every machine with that tune. Making its CONTENTS depend on
+# ${MACHINE} while its arch does not is how you get a package built for one
+# board served to another. Our two boards have different tunes
+# (aarch64 vs arm1176jzfshf-vfp) so nothing would collide today — this is
+# here so it does not become a trap on the day a third board shares a tune.
+PACKAGE_ARCH = "${MACHINE_ARCH}"
