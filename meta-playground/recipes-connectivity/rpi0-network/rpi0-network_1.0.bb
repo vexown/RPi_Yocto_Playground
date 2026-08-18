@@ -1,11 +1,16 @@
 # rpi0-network_1.0.bb — the Zero W's entire network stack configuration.
 #
-# Three small files, and between them they replace NetworkManager:
+# Four small files, and between them they replace NetworkManager:
 #
 #   20-wlan0.network             layer 3 (address, route, DNS) via networkd
-#   97-rpi0-logger-net.preset    switches on wpa_supplicant@wlan0
+#   97-rpi0-logger-net.preset    switches on the supplicant template
+#   10-default-instance.conf     drop-in saying WHICH instance that means
 #   wpa_supplicant-wlan0.conf.example   documentation of the file we refuse
 #                                       to ship
+#
+# The last two are one mechanism split across two files, and the split is
+# not decoration — see 10-default-instance.conf for the silent no-op that
+# made it necessary.
 #
 # The baseline this is aimed at: NetworkManager was 43.0 s of an 86.9 s
 # boot on the deployed Raspberry Pi OS card, with sshd ordered behind it
@@ -23,6 +28,7 @@ LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda
 
 SRC_URI = "file://20-wlan0.network \
            file://97-rpi0-logger-net.preset \
+           file://10-default-instance.conf \
            file://wpa_supplicant-wlan0.conf.example \
            "
 
@@ -61,6 +67,15 @@ do_install() {
     install -m 0644 ${S}/97-rpi0-logger-net.preset \
         ${D}${systemd_unitdir}/system-preset/
 
+    # The drop-in that gives wpa_supplicant@.service a DefaultInstance.
+    # Vendor dir, next to the unit it extends: this is packaging, not admin
+    # policy, and an admin who disagrees can shadow it from
+    # /etc/systemd/system/wpa_supplicant@.service.d/ where drop-ins of the
+    # same name win.
+    install -d ${D}${systemd_system_unitdir}/wpa_supplicant@.service.d
+    install -m 0644 ${S}/10-default-instance.conf \
+        ${D}${systemd_system_unitdir}/wpa_supplicant@.service.d/
+
     # /etc/wpa_supplicant/ — created here, deliberately EMPTY apart from
     # the example. wpa_supplicant@wlan0.service will look for
     # wpa_supplicant-wlan0.conf in it and, on a freshly flashed card, not
@@ -79,8 +94,15 @@ do_install() {
 # Default FILES:${PN} covers ${sysconfdir} but NOT ${systemd_unitdir}
 # (/usr/lib/systemd) — that path is normally claimed by systemd.bbclass on
 # behalf of recipes that ship units, and this recipe ships no units, so it
-# doesn't inherit systemd and has to claim the preset directory itself.
-FILES:${PN} += "${systemd_unitdir}/system-preset"
+# doesn't inherit systemd and has to claim these paths itself.
+#
+# The drop-in directory is named precisely rather than claiming all of
+# ${systemd_system_unitdir}: this package has no business owning a path
+# that poky's own systemd and wpa-supplicant packages populate, and an
+# overly greedy FILES is how two packages end up fighting over a directory.
+FILES:${PN} += "${systemd_unitdir}/system-preset \
+                ${systemd_system_unitdir}/wpa_supplicant@.service.d \
+                "
 
 # The .network file is genuinely the administrator's to edit — mark it so
 # a package upgrade doesn't stomp a hand-tuned static address.

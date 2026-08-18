@@ -28,10 +28,25 @@
 # presets and well ahead of 99-default.preset, which is a blanket
 # "disable *".
 #
-# One limit worth knowing before the optimize pass: "--preset-mode=
-# enable-only" means preset files can only turn things ON. You cannot
-# disable a unit this way — a "disable foo.service" line here is silently
-# ignored. When we come to strip systemd-networkd-wait-online.service and
-# friends, the tool is masking or SYSTEMD_SERVICE surgery, not this file.
+# NOTE THE UNIT NAME BELOW: the TEMPLATE, "wpa_supplicant@.service", not
+# the instance "wpa_supplicant@wlan0.service". This file said the latter on
+# its first outing and it silently did nothing — preset-all iterates over
+# unit FILES, and an instance name is not a file. Which instance gets
+# enabled is decided by DefaultInstance= in the drop-in this recipe also
+# ships (10-default-instance.conf), where the full post-mortem lives.
+#
+# Two limits worth knowing before the optimize pass:
+#
+#   * "--preset-mode=enable-only" means preset files can only turn things
+#     ON. A "disable foo.service" line here is silently ignored. When we
+#     strip systemd-networkd-wait-online.service and friends, the tool is
+#     masking or SYSTEMD_SERVICE surgery, not this file.
+#
+#   * The rootfs is assembled by systemd-systemctl-native — a Python
+#     reimplementation of systemctl in poky, not the real thing. It is
+#     close, but "the host's systemctl does X" is not evidence about the
+#     build. Test against
+#     poky/meta/recipes-core/systemd/systemd-systemctl/systemctl, which is
+#     a script you can run against a throwaway --root.
 
-enable wpa_supplicant@wlan0.service
+enable wpa_supplicant@.service
