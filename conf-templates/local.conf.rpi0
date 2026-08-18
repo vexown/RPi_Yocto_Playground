@@ -154,6 +154,56 @@ EXTRA_IMAGE_FEATURES ?= "debug-tweaks ssh-server-dropbear"
 # Deliberately unset either way until the first boot answers it.
 VOLATILE_LOG_DIR = "no"
 
+# --- Accepting a restricted-licence firmware blob ----------------------------
+# Without this line the build fails at task-queue time, before compiling
+# anything:
+#
+#   ERROR: Nothing RPROVIDES 'linux-firmware-rpidistro-bcm43430'
+#   linux-firmware-rpidistro RPROVIDES linux-firmware-rpidistro-bcm43430
+#   but was skipped: Has a restricted license 'synaptics-killswitch' which
+#   is not listed in your LICENSE_FLAGS_ACCEPTED.
+#
+# WHAT LICENSE_FLAGS IS. Yocto separates two questions that people
+# routinely conflate. LICENSE is a statement of fact — "this is what the
+# code is under" — and it is never a gate. LICENSE_FLAGS is a gate: a
+# recipe raises a named flag, and the build refuses to include that recipe
+# until the integrator names the same flag in LICENSE_FLAGS_ACCEPTED. It
+# exists for licences a human is expected to read and consciously accept:
+# commercial terms, redistribution restrictions, click-through EULAs.
+# Putting the flag here is that act of acceptance, recorded in a tracked
+# file rather than in someone's memory. (Pre-kirkstone this variable was
+# LICENSE_FLAGS_WHITELIST; scarthgap only knows the new name.)
+#
+# WHAT WE ARE ACTUALLY ACCEPTING, which is narrower than the flag suggests.
+# linux-firmware-rpidistro_git.bb:16 sets LICENSE_FLAGS at RECIPE level, so
+# one flag gates every package it produces. But the package we want
+# declares its own licence on line 70:
+#
+#   LICENSE:${PN}-bcm43430 = "binary-redist-Cypress-rpidistro"
+#
+# Cypress, not Synaptics. The Synaptics-licensed blobs are lines 71-75 —
+# bcm43436/43439/43456, which are other boards' radios and which this image
+# does not install. So the Zero W's firmware is blocked by a flag named
+# after a licence it is not under. Not a bug, just recipe-level granularity
+# being coarser than package-level licensing.
+#
+# The actual licence text is not in this repo and not in poky's
+# common-licenses — NO_GENERIC_LICENSE points both custom licences at
+# debian/copyright inside the fetched source. Read it after the fetch:
+#
+#   less $(bitbake -e linux-firmware-rpidistro | \
+#          sed -n 's/^S="\(.*\)"$/\1/p')/debian/copyright
+#
+# WHY WE ACCEPT RATHER THAN ROUTE AROUND. poky has its own
+# linux-firmware-bcm43430 for the same chip with no flag on it, and the
+# rpidistro recipe even RREPLACES it (line 114). Tempting, but wrong here:
+# meta-raspberrypi points this machine at the rpidistro package
+# deliberately, because brcmfmac needs a board-specific NVRAM .txt
+# alongside the .bin and the Raspberry Pi Foundation's build is the one
+# tested against this hardware. Taking the BSP's word on which blob drives
+# the radio is cheaper than debugging association failures.
+LICENSE_FLAGS_ACCEPTED += "synaptics-killswitch"
+
 # --- What is deliberately absent, and why -----------------------------------
 # Read this list next to local.conf.rpi5; the differences are the design.
 #

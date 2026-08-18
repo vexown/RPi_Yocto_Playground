@@ -96,7 +96,30 @@ if [ "$FIRST_TIME" = 1 ]; then
     echo ">>> Installed tracked bblayers.conf + local.conf.$TARGET from $REPO_DIR/conf-templates"
 fi
 
-# Standing gotcha, unchanged since session 3: the copy above happens ONLY on
-# first init. After editing a template, copy it in by hand:
-#   cp $LOCAL_CONF $BUILD_DIR/conf/local.conf
+# Standing gotcha since session 3: the copy above happens ONLY on first init,
+# so an edited template and a live build dir silently drift apart. Session 15
+# lost a build cycle to exactly that — LICENSE_FLAGS_ACCEPTED was added to
+# the template and the build kept failing against the stale copy.
+#
+# Not auto-copying is deliberate: overwriting a build config you were
+# mid-experiment in is worse than a warning. So we detect and report instead,
+# and hand you the exact command.
+#
+# Note the comparison uses the tracked template as the reference in both
+# directions — `diff -q` says nothing about WHICH way things differ, which is
+# the point. Either the template gained something the build dir needs, or the
+# build dir has a local experiment worth folding back into the template.
+# Both are worth stopping to look at.
+if ! diff -q "$LOCAL_CONF" "$BUILD_DIR/conf/local.conf" >/dev/null 2>&1; then
+    echo ">>> WARNING: $BUILD_DIR/conf/local.conf differs from the tracked"
+    echo "    conf-templates/local.conf.$TARGET. Functional differences:"
+    # Strip comment-only lines so the report is about SETTINGS, not prose —
+    # these templates are mostly comments and a raw diff is unreadable.
+    diff -u "$BUILD_DIR/conf/local.conf" "$LOCAL_CONF" \
+        | grep -E '^[-+]' | grep -vE '^[-+][-+]' | grep -vE '^[-+][[:space:]]*(#|$)' \
+        | sed 's/^/      /'
+    echo "    ('-' = only in the build dir, '+' = only in the template)"
+    echo "    To take the template:  cp $LOCAL_CONF $BUILD_DIR/conf/local.conf"
+fi
+
 echo ">>> Ready ($TARGET -> $(grep -m1 '^MACHINE' "$BUILD_DIR/conf/local.conf")).  Try:  bitbake core-image-minimal"
