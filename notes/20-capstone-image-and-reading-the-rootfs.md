@@ -471,6 +471,46 @@ single boot: it is a FIRST boot and still carries first-boot costs —
 `dropbearkey.service` alone is 4.733 s in `systemd-analyze blame`, and it
 never runs again.
 
+### The clean second boot, and why the caveat barely mattered
+
+```
+Startup finished in 4.716s (kernel) + 17.342s (userspace) = 22.058s
+multi-user.target reached after 16.988s in userspace.
+```
+
+**0.6 seconds faster.** `dropbearkey.service` and its 4.733 s are gone
+from `blame` entirely, and the total moved by six hundred milliseconds.
+
+That gap is the lesson, and it is a trap worth naming: **`systemd-analyze
+blame` does not rank units by their contribution to boot time.** It ranks
+them by how long each unit took to start, and on a system with any
+parallelism most of those durations overlap. `dropbearkey` was 4.7 s of
+wall time spent *alongside* the wait for `wlan0`, not in series with it.
+Removing it freed a core that had nothing else to do.
+
+`systemd-analyze critical-chain` is the one that answers "what is making
+boot slow", and it said the same thing before and after:
+
+```
+multi-user.target @16.988s
+`-wpa_supplicant@wlan0.service @16.947s
+  `-sys-subsystem-net-devices-wlan0.device @16.782s
+```
+
+So the first-boot caveat was real but worth 0.6 s, and the honest
+conclusion is that **the clean baseline is 22.06 s and it is essentially
+all one wait.** Everything in the blame list — networkd 5.9 s, resolved
+4.9 s, timesyncd 4.6 s, udev-trigger 3.4 s — is happening inside the
+shadow of that wait, and shortening any of them alone changes nothing.
+
+Corollary for the optimisation work ahead: only changes that move
+`sys-subsystem-net-devices-wlan0.device` earlier can move the total.
+Everything else has to be justified on footprint, SD wear or correctness
+instead — which is a fine justification, but it is not boot time, and
+conflating the two is how people spend a week making a boot 0.6 s faster.
+(`dev-mmcblk0p2.device` did drop 10.4 s → 8.5 s between the two boots
+without the total following it, which is the same lesson a second time.)
+
 ### The critical chain is one wait
 
 ```
@@ -575,10 +615,10 @@ not yet answered.
 
 ## Next
 
-1. **Get a clean second-boot number.** Everything measured so far is a
-   first boot and carries `dropbearkey` (4.7 s) and postinsts. Rebuild
-   with the busybox-syslog and vc4 removals first, so the number is a
-   fresh starting point rather than a mid-change one.
+1. **Reflash with the busybox-syslog and vc4 removals and re-measure.**
+   The clean pre-change baseline is 22.058 s; judge those two against it.
+   Expect little or nothing on the total — neither is on the critical
+   chain — and that is the point of measuring rather than assuming.
 2. **Attack the 17-second hole**, one change at a time so each has a
    measured value: module compression off, then the WiFi stack built into
    the kernel. Then look at the 7.4 s DHCP, which nobody has examined.
@@ -616,7 +656,8 @@ config bisection out-argues flaky media.
 
 - **The Zero W now runs Yocto.** Flashed, provisioned, on WiFi at
   192.168.50.34, reachable over SSH as root with `~/.ssh/pi_zero_key`.
-  22.66 s first boot vs the 86.9 s Raspberry Pi OS baseline.
+  **22.058 s clean second boot** (4.72 kernel + 17.34 userspace) vs the
+  86.9 s Raspberry Pi OS baseline. That is the number to beat from here.
 - Raspberry Pi OS Lite is off the board. Rollback for the whole capstone
   is still one `dd` away:
   `/media/blankmcu/EmbeddedLinux/backups/rpi0-pios-lite-2026-08-17.img.gz`.
@@ -626,7 +667,6 @@ config bisection out-argues flaky media.
   measured.
 - `~/.rpi0-secrets/wpa_supplicant-wlan0.conf` exists and works. It is
   outside the repo and stays there.
-- `~/.ssh/config`'s `Host rpi0` entry still says `User blankmcu`, which
-  does not exist on this image. Either `User root` or connect with
-  `root@192.168.50.34`. The IP is a DHCP lease and will drift.
+- `~/.ssh/config`'s `Host rpi0` entry now works (`ssh rpi0`). The IP in it
+  is a DHCP lease and will drift — a router reservation is the cheap fix.
 - The serial logger itself has **not been exercised on this board yet.**
