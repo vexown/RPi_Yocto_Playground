@@ -58,9 +58,49 @@ DEVICE="${1:-}"
 SECRETS_DIR="${SECRETS_DIR:-$HOME/.rpi0-secrets}"
 
 WPA_SRC="$SECRETS_DIR/wpa_supplicant-wlan0.conf"
-# Default to this machine's own key. Point PUBKEY at another file to
-# install a different one (e.g. the work laptop's).
-PUBKEY="${PUBKEY:-$HOME/.ssh/id_ed25519.pub}"
+# Which public key to install. Override explicitly with:
+#   PUBKEY=~/.ssh/some_key.pub ./scripts/provision-card.sh /dev/sdX
+#
+# The default used to be a hardcoded $HOME/.ssh/id_ed25519.pub, which does
+# not exist on this machine — the first run just failed. Guessing one
+# filename out of the many ssh-keygen can produce is a bad default, so
+# instead: prefer a key named after this board, then fall back to the
+# conventional names in the order ssh itself prefers them (ed25519 before
+# ecdsa before rsa).
+if [ -z "${PUBKEY:-}" ]; then
+    for candidate in pi_zero_key id_ed25519 id_ecdsa id_rsa; do
+        if [ -f "$HOME/.ssh/$candidate.pub" ]; then
+            PUBKEY="$HOME/.ssh/$candidate.pub"
+            break
+        fi
+    done
+fi
+
+# Still nothing? Do not fail with a single guessed path — show what is
+# actually available, with fingerprints, so the choice is one copy-paste
+# away. An error message that lists the valid answers is worth ten that
+# state the problem.
+if [ -z "${PUBKEY:-}" ] || [ ! -f "$PUBKEY" ]; then
+    echo "ERROR: no usable public key${PUBKEY:+ at $PUBKEY}."
+    echo
+    echo "Public keys found in $HOME/.ssh:"
+    found=0
+    for k in "$HOME"/.ssh/*.pub; do
+        [ -f "$k" ] || continue
+        found=1
+        # Only offer keys whose PRIVATE half is here — installing a public
+        # key you cannot authenticate with produces a board you have locked
+        # yourself out of, which is the worst possible outcome for a
+        # headless unit.
+        if [ -f "${k%.pub}" ]; then usable="usable"; else usable="NO PRIVATE HALF ON THIS PC"; fi
+        printf '    %-40s %-10s %s\n' "$k" "$usable" \
+            "$(ssh-keygen -l -f "$k" 2>/dev/null | awk '{print $1, $NF}')"
+    done
+    [ "$found" = 1 ] || echo "    (none)"
+    echo
+    echo "Re-run with:  PUBKEY=<path> $0 $DEVICE"
+    exit 1
+fi
 
 MNT="$(mktemp -d /tmp/rpi0-card.XXXXXX)"
 # Clean up the mountpoint no matter how we exit. Note the "|| true": if the
@@ -122,7 +162,17 @@ if [ ! -f "$WPA_SRC" ]; then
     echo "  \$EDITOR $WPA_SRC     # real SSID; psk from: wpa_passphrase 'SSID' 'password'"
     exit 1
 fi
-[ -f "$PUBKEY" ] || { echo "ERROR: no public key at $PUBKEY (set PUBKEY=... to choose another)"; exit 1; }
+# (No -f check on $PUBKEY here: the key-selection block above already
+# exits with a listing of the available keys if it cannot settle on one.)
+
+# Warn, but do not refuse, if the private half is missing. It is legitimate
+# to provision a card with someone else's public key — the work laptop's,
+# say — but doing it by accident means a headless board you cannot log in
+# to, so it should never be silent.
+if [ ! -f "${PUBKEY%.pub}" ]; then
+    echo "    WARNING: no private half at ${PUBKEY%.pub} — you will not be"
+    echo "             able to ssh in from THIS machine with this key."
+fi
 
 # --- Mount and install -------------------------------------------------------
 echo ">>> Mounting $ROOTPART ..."
