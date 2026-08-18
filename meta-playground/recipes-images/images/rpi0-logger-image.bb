@@ -130,14 +130,98 @@ LOGGER_USB_SERIAL_MODULES = "\
 # whole reason ENABLE_UART=1 pins core_freq to 250 MHz.
 LOGGER_WIFI = "\
     kernel-module-brcmfmac \
+    kernel-module-brcmfmac-wcc \
     kernel-module-brcmutil \
     linux-firmware-rpidistro-bcm43430 \
+    wireless-regdb-static \
     wpa-supplicant \
     "
+
+# --- Two additions the first boot forced, and what they cost -----------------
+#
+# kernel-module-brcmfmac-wcc
+#
+#   The first flash booted perfectly and had no wlan0. The journal said:
+#
+#     brcmfmac: brcmf_fw_alloc_request: using brcm/brcmfmac43430-sdio for chip BCM43430/1
+#     brcmfmac: brcmf_fwvid_request_module: mod=wcc: failed 256
+#     ieee80211 phy0: brcmf_attach: brcmf_fwvid_attach failed
+#     brcmfmac: brcmf_sdio_firmware_callback: brcmf_attach failed
+#
+#   Linux 6.6 split brcmfmac's vendor-specific code into separate modules —
+#   brcmfmac-wcc, brcmfmac-bca and brcmfmac-cyw are all built here. The core
+#   module probes the chip, decides which VENDOR it is, and then
+#   request_module()s that one at runtime. BCM43430 resolves to wcc, so
+#   brcmfmac alone attaches to the SDIO device, reads the chip ID, and then
+#   fails — which is why the failure looks like a firmware problem and is
+#   not one. The blob loaded fine.
+#
+#   This is the bill for naming modules explicitly instead of installing
+#   `kernel-modules`. Four USB drivers plus brcmfmac plus brcmutil looked
+#   like the complete list, and a runtime request_module() dependency is
+#   invisible to every static check we ran. Only wcc is added, not bca or
+#   cyw: this board has one radio and the log names its vendor. If a future
+#   board needs another, the log will say so in the same words.
+#
+# wireless-regdb-static
+#
+#   Same boot, quieter line:
+#
+#     platform regulatory.0: Direct firmware load for regulatory.db failed with error -2
+#
+#   Without the regulatory database the kernel falls back to the built-in
+#   "world" domain, which is deliberately conservative — reduced TX power
+#   and, in region 2.4 GHz, channels 12 and 13 unusable. Our
+#   wpa_supplicant.conf sets country=, and that setting cannot take effect
+#   with no database to look the country up in. On a router parked on
+#   channel 12 or 13 this alone is enough to never associate.
+#
+#   The files live in the -static package, not the main one
+#   (wireless-regdb_*.bb:29) — the main package is for the CRDA userspace
+#   helper path, which modern kernels do not use.
 
 # No locales. Same trick core-image-minimal uses to stay small, and on a
 # headless logger there is nothing to localise.
 IMAGE_LINGUAS = " "
+
+# --- Stop wic from rewriting our fstab ---------------------------------------
+#
+# The first boot's journal, before anything else went wrong:
+#
+#   systemd-fstab-generator[77]: Failed to create unit file
+#     '/run/systemd/generator/boot.mount', as it already exists.
+#     Duplicate entry in '/etc/fstab'?
+#   (sd-exec-[75]: systemd-fstab-generator failed with exit status 1.
+#
+# The generator did not warn and carry on — it EXITED 1, meaning the whole
+# fstab-to-units translation was abandoned for that boot.
+#
+# Cause: wic writes fstab entries of its own. update_fstab() in
+# poky/scripts/lib/wic/plugins/imager/direct.py loops over every partition
+# with a mountpoint other than "/" and APPENDS a line — with no check for
+# whether that mountpoint is already in the file. So our carefully
+# commented /boot line from
+# recipes-core/base-files/files/raspberrypi0-wifi/fstab and wic's
+# tab-separated generated one both ended up in /etc/fstab, naming the same
+# device and the same mountpoint.
+#
+# Note this only bites because we HAVE a hand-written fstab. On a stock
+# image wic's line is the only one and everything is fine, which is why
+# this is not a known trap.
+#
+# Two ways to fix it. We could delete /boot from our fstab and let wic
+# generate it, passing --fsopts to get "nofail" back. Instead: keep one
+# file authoritative for the mount table and tell wic to keep its hands
+# off. Our fstab explains WHY each line is there, applies to every image
+# type rather than just the .wic, and nofail is a decision that deserves
+# to live next to its reasoning.
+#
+# The switch is wic's command-line option, not the per-partition
+# --no-fstab-update in ksparser.py — that flag exists but the loop above
+# never consults it in scarthgap. image_types_wic.bbclass:73 passes
+# WIC_CREATE_EXTRA_ARGS straight through to `wic create`, so no custom
+# .wks is needed.
+WIC_CREATE_EXTRA_ARGS += " --no-fstab-update"
 
 # ---------------------------------------------------------------------------
 # WHAT IS DELIBERATELY ABSENT, AND WHY

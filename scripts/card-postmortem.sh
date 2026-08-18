@@ -164,17 +164,29 @@ echo
 echo "=============================================================="
 echo " 4. Was the card provisioned?"
 echo "=============================================================="
+# These checks MUST run under sudo. Both paths are deliberately locked down
+# — /etc/wpa_supplicant is 0700 root-owned, /root is 0700 — so an ordinary
+# user gets EACCES on the directory and `[ -f ... ]` returns false. The
+# first version of this script did exactly that and cheerfully reported
+# both files MISSING on a card that had been provisioned correctly minutes
+# earlier, sending us hunting for a phantom.
+#
+# Worth generalising: a test that cannot distinguish "absent" from
+# "unreadable" is not a test, it is a coin flip that sometimes lies with
+# confidence. Where the distinction matters, check for it.
 for f in /etc/wpa_supplicant/wpa_supplicant-wlan0.conf /root/.ssh/authorized_keys; do
-    if [ -f "$ROOT$f" ]; then
-        echo "    present: $f  ($(stat -c '%A %u:%g' "$ROOT$f"))"
+    if sudo test -f "$ROOT$f"; then
+        echo "    present: $f  ($(sudo stat -c '%A %u:%g' "$ROOT$f"))"
+    elif sudo test -e "$ROOT$f"; then
+        echo "    EXISTS BUT NOT A REGULAR FILE: $f"
     else
         echo "    MISSING: $f"
     fi
 done
 # Never print the PSK. Structure only.
 W="$ROOT/etc/wpa_supplicant/wpa_supplicant-wlan0.conf"
-if [ -f "$W" ]; then
-    echo "    wpa conf: $(grep -cE '^\s*network=\{' "$W" || true) network block(s), \
-$(grep -cE '^\s*psk=' "$W" || true) psk line(s), \
-country=$(grep -oE '^\s*country=[A-Z]{2}' "$W" | head -1 | cut -d= -f2 || echo '(unset)')"
+if sudo test -f "$W"; then
+    echo "    wpa conf: $(sudo grep -cE '^\s*network=\{' "$W" || true) network block(s), \
+$(sudo grep -cE '^\s*psk=' "$W" || true) psk line(s), \
+country=$(sudo grep -oE '^\s*country=[A-Z]{2}' "$W" | head -1 | cut -d= -f2 || echo '(unset)')"
 fi
