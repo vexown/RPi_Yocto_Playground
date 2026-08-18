@@ -204,6 +204,27 @@ VOLATILE_LOG_DIR = "no"
 # the radio is cheaper than debugging association failures.
 LICENSE_FLAGS_ACCEPTED += "synaptics-killswitch"
 
+# --- No graphics stack on a headless logger ----------------------------------
+# The first flash shipped `dtoverlay=vc4-kms-v3d` in config.txt. Worth
+# recording that this was my leading suspect for the board not booting, and
+# it was wrong — the board boots fine with it. Removing it now is an
+# optimisation on its own merits, not a fix.
+#
+# Where it came from: rpi-config_git.bb:220 writes `dtoverlay=${VC4DTBO}`
+# whenever VC4GRAPHICS is 1, and VC4GRAPHICS follows the "vc4graphics"
+# MACHINE_FEATURE that rpi-base.inc:125 adds unless DISABLE_VC4GRAPHICS is
+# set. VC4DTBO itself defaults to "vc4-kms-v3d" (rpi-config_git.bb:28) —
+# note raspberrypi3.conf deliberately overrides that to the FAKE-KMS
+# variant for the older SoCs, and raspberrypi0-wifi.conf sets nothing, so
+# this ARMv6 board inherited the Pi4+ full-KMS overlay by default.
+#
+# Either way it is dead weight here: no display is ever attached, the
+# overlay costs CMA out of 512 MB of RAM and probe time out of the boot
+# budget. Setting this also drops xf86-video-modesetting and
+# xserver-xorg-extension-glx from MACHINE_EXTRA_RRECOMMENDS
+# (rpi-base.inc:13-14), which this image was not pulling anyway.
+DISABLE_VC4GRAPHICS = "1"
+
 # --- What is deliberately absent, and why -----------------------------------
 # Read this list next to local.conf.rpi5; the differences are the design.
 #

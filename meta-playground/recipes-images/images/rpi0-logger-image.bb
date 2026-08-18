@@ -184,6 +184,41 @@ LOGGER_WIFI = "\
 # headless logger there is nothing to localise.
 IMAGE_LINGUAS = " "
 
+# --- Drop the duplicate syslog daemon ----------------------------------------
+#
+# Found by reading the first boot's journal, where EVERY kernel line
+# appears twice:
+#
+#   [21.268867] raspberrypi0-wifi kernel:      brcmfmac: F1 signature read ...
+#   [21.281007] raspberrypi0-wifi kernel[181]: [21.268867] brcmfmac: F1 signature read ...
+#
+# PID 181 is busybox klogd. journald already reads /dev/kmsg directly, so
+# klogd re-reads the same kernel ring buffer and re-injects every line as a
+# syslog message, which journald then writes to disk a second time. Double
+# the journal writes, onto an SD card, during boot.
+#
+# Look at the timestamps above and it is worse than redundant: the
+# duplicate arrives at monotonic 21.28 quoting a kernel timestamp of 21.27,
+# but the copies of the EARLY kernel messages land at ~18-19 s while
+# quoting timestamps of 0-4 s. klogd spends the first 18 seconds of boot
+# replaying the ring buffer into journald — CPU and I/O spent, on one
+# ARM11 core, on the boot critical path, producing nothing.
+#
+# It is here at all because packagegroup-core-boot RRECOMMENDS
+# ${VIRTUAL-RUNTIME_base-utils-syslog}, which default-providers.inc:31
+# defaults to busybox-syslog. That default predates systemd being the
+# normal case; with journald there is nothing left for it to do —
+# systemd-journald-dev-log.socket already provides /dev/log for anything
+# that logs the classic way.
+#
+# BAD_RECOMMENDATIONS rather than overriding VIRTUAL-RUNTIME_*: this is an
+# image-level decision ("this OS does not want that package") and
+# BAD_RECOMMENDATIONS is the image-level knob for dropping an RRECOMMENDS
+# without touching the packagegroup that made it. Note it works with rpm
+# and ipk but NOT deb (rootfs_deb.bbclass:19 warns and ignores it) — fine
+# here, PACKAGE_CLASSES is package_rpm.
+BAD_RECOMMENDATIONS += "busybox-syslog"
+
 # --- Stop wic from rewriting our fstab ---------------------------------------
 #
 # The first boot's journal, before anything else went wrong:
