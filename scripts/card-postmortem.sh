@@ -40,34 +40,71 @@ case "$DEVICE" in
 esac
 
 MNT="$(mktemp -d /tmp/rpi0-pm.XXXXXX)"
+mkdir -p "$MNT/boot" "$MNT/root"
+
+# Track only the mounts WE made, so cleanup never unmounts something that
+# was already there. The desktop auto-mounts removable media on insert
+# (that is what /media/blankmcu/root is), and tearing down a mount we did
+# not create would be a rude surprise mid-session.
+OURS=""
 cleanup() {
-    mountpoint -q "$MNT/boot" && sudo umount "$MNT/boot" || true
-    mountpoint -q "$MNT/root" && sudo umount "$MNT/root" || true
+    for m in $OURS; do mountpoint -q "$m" && sudo umount "$m" || true; done
     rmdir "$MNT/boot" "$MNT/root" "$MNT" 2>/dev/null || true
 }
 trap cleanup EXIT
-mkdir -p "$MNT/boot" "$MNT/root"
+
+# Resolve a partition to a readable directory.
+#
+# First outing of this script died here: it assumed it owned the mounting,
+# and the desktop had already auto-mounted both partitions, so every
+# `mount` failed with "already mounted on /media/blankmcu/root". Refusing
+# (the way flash-sd.sh does, because IT writes raw blocks and a mounted
+# card is genuinely dangerous) is the wrong call for a read-only tool. We
+# just use whatever mount already exists.
+#
+# The caveat, stated rather than hidden: a desktop auto-mount is READ-WRITE.
+# Nothing here writes, but the evidence is then only as safe as this
+# script's restraint, not as safe as a ro mount flag. Pass STRICT_RO=1 to
+# refuse an existing rw mount instead of using it.
+resolve_part() {
+    local dev="$1" want="$2" existing
+    existing="$(findmnt -n -o TARGET --source "$dev" 2>/dev/null | head -1 || true)"
+    if [ -n "$existing" ]; then
+        if [ "${STRICT_RO:-0}" = "1" ] && ! findmnt -n -o OPTIONS --source "$dev" | head -1 | grep -q '\bro\b'; then
+            echo "" ; return 1
+        fi
+        echo "$existing"; return 0
+    fi
+    if sudo mount -o ro "$dev" "$want" 2>/dev/null; then
+        OURS="$OURS $want"; echo "$want"; return 0
+    fi
+    echo ""; return 1
+}
 
 echo "=============================================================="
 echo " 1. What the firmware was told to do"
 echo "=============================================================="
-if sudo mount -o ro "$P1" "$MNT/boot" 2>/dev/null; then
+BOOT="$(resolve_part "$P1" "$MNT/boot")" || true
+if [ -n "$BOOT" ]; then
+    echo "    (reading $P1 at $BOOT)"
     echo "--- config.txt (non-comment lines) ---"
-    grep -vE '^\s*(#|$)' "$MNT/boot/config.txt" 2>/dev/null | sed 's/^/    /' || echo "    (unreadable)"
+    grep -vE '^\s*(#|$)' "$BOOT/config.txt" 2>/dev/null | sed 's/^/    /' || echo "    (unreadable)"
     echo "--- cmdline.txt ---"
-    sed 's/^/    /' "$MNT/boot/cmdline.txt" 2>/dev/null || echo "    (unreadable)"
+    sed 's/^/    /' "$BOOT/cmdline.txt" 2>/dev/null || echo "    (unreadable)"
     echo "--- kernel present? ---"
-    ls -l "$MNT/boot"/kernel*.img 2>/dev/null | awk '{printf "    %s  %s bytes\n", $NF, $5}' \
+    ls -l "$BOOT"/kernel*.img 2>/dev/null | awk '{printf "    %s  %s bytes\n", $NF, $5}' \
         || echo "    !!! no kernel*.img on the boot partition"
 else
-    echo "    !!! could not mount $P1 — the FAT partition may be damaged."
+    echo "    !!! could not read $P1 — the FAT partition may be damaged."
 fi
 
 echo
 echo "=============================================================="
 echo " 2. Did userspace ever run?"
 echo "=============================================================="
-sudo mount -o ro "$P2" "$MNT/root" || { echo "    !!! could not mount $P2"; exit 1; }
+ROOT="$(resolve_part "$P2" "$MNT/root")" || true
+[ -n "$ROOT" ] || { echo "    !!! could not read $P2"; exit 1; }
+echo "    (reading $P2 at $ROOT)"
 
 # /etc/machine-id is the cleanest single marker. The image ships it EMPTY
 # (image.bbclass creates it so a read-only rootfs can boot); systemd writes
@@ -75,7 +112,7 @@ sudo mount -o ro "$P2" "$MNT/root" || { echo "    !!! could not mount $P2"; exit
 #   absent   -> the file was never even created (wrong rootfs?)
 #   empty    -> systemd never got far enough to commit one
 #   32 hex   -> PID 1 ran
-MID="$MNT/root/etc/machine-id"
+MID="$ROOT/etc/machine-id"
 if [ ! -f "$MID" ]; then
     echo "    /etc/machine-id: ABSENT"
 elif [ ! -s "$MID" ]; then
@@ -84,9 +121,9 @@ else
     echo "    /etc/machine-id: $(cat "$MID")  -> PID 1 ran"
 fi
 
-echo "    /var/log is a: $( [ -L "$MNT/root/var/log" ] && echo 'SYMLINK (volatile! VOLATILE_LOG_DIR did not take)' || echo 'real directory' )"
+echo "    /var/log is a: $( [ -L "$ROOT/var/log" ] && echo 'SYMLINK (volatile! VOLATILE_LOG_DIR did not take)' || echo 'real directory' )"
 
-JDIR="$MNT/root/var/log/journal"
+JDIR="$ROOT/var/log/journal"
 if [ ! -d "$JDIR" ]; then
     echo "    /var/log/journal: ABSENT -> journald had nowhere persistent to write"
 else
@@ -128,14 +165,14 @@ echo "=============================================================="
 echo " 4. Was the card provisioned?"
 echo "=============================================================="
 for f in /etc/wpa_supplicant/wpa_supplicant-wlan0.conf /root/.ssh/authorized_keys; do
-    if [ -f "$MNT/root$f" ]; then
-        echo "    present: $f  ($(stat -c '%A %u:%g' "$MNT/root$f"))"
+    if [ -f "$ROOT$f" ]; then
+        echo "    present: $f  ($(stat -c '%A %u:%g' "$ROOT$f"))"
     else
         echo "    MISSING: $f"
     fi
 done
 # Never print the PSK. Structure only.
-W="$MNT/root/etc/wpa_supplicant/wpa_supplicant-wlan0.conf"
+W="$ROOT/etc/wpa_supplicant/wpa_supplicant-wlan0.conf"
 if [ -f "$W" ]; then
     echo "    wpa conf: $(grep -cE '^\s*network=\{' "$W" || true) network block(s), \
 $(grep -cE '^\s*psk=' "$W" || true) psk line(s), \
