@@ -104,16 +104,22 @@ in ~10-15 s):
       74.5 s userspace), of which `NetworkManager` alone is 43.0 s, 2026-08-17
       (notes/19). Measuring also found the deployed logger crash-looping on a
       hardcoded `/dev/ttyUSB0` and burning 100% of the core on a busy-wait.
-- [ ] Minimal image: its own recipe (not `core-image-minimal` — a
-      meta-rauc-community bbappend reaches that name and adds 1732 kernel
-      modules), dropbear + wpa_supplicant + WiFi firmware, four named USB
-      serial modules. Note: **systemd, not sysvinit** as originally planned —
-      the logger's udev/`BindsTo=` device activation depends on it.
+- [x] Minimal image: `rpi0-logger-image`, its own recipe so no bbappend
+      written against `core-image-minimal` can reach it — **45.9 MB / 112
+      packages**, vs 59.4 MB for `core-image-minimal` on the same board,
+      2026-08-18 (notes/20). systemd not sysvinit, as the logger's
+      udev/`BindsTo=` activation requires. Also fixed the `:rpi`-scoped
+      fstab that would have dropped this two-partition card into an
+      emergency shell, replaced NetworkManager with systemd-networkd +
+      wpa_supplicant, and made `/var/log` persistent so the logger's
+      captures are not written to tmpfs. Built, **not yet flashed**.
 - [x] Recipe for the USB serial logger — `meta-playground/recipes-apps/serial-logger`,
       rewritten in C (9.6 KB binary), udev rule instantiates a systemd
       template unit per device, `BindsTo=` replaces the crash loop; verified
       on the Pi 5 2026-08-17 (notes/19)
 - [ ] Measure, then optimize: trim kernel config, quiet boot, static IP option
+      (levers identified and deliberately unpulled until there is a number —
+      list in notes/20)
 - [ ] Read-only rootfs so yanking power can't corrupt the SD card
 
 ## Notes
