@@ -135,14 +135,23 @@ EXTRA_IMAGE_FEATURES ?= "debug-tweaks ssh-server-dropbear"
 # a ReadWritePaths= to the unit, and a unit that differs per board is a
 # unit that gets out of sync.
 #
-# Watch for on first boot: with a real /var/log, systemd ships a
-# /var/log/journal directory, and journald's default Storage=auto persists
-# whenever that directory exists. So the SYSTEM journal becomes persistent
-# too. For a field logger that is arguably a feature (post-mortem after a
-# power cut survives), but it is unbounded SD wear if left alone —
-# SystemMaxUse= or Storage=volatile is the knob. Deliberately not set yet:
-# measure first, and `journalctl --disk-usage` after a few days is the
-# measurement.
+# Knock-on effect to CHECK on the first boot rather than assume. journald's
+# default is Storage=auto, which means "persist if and only if
+# /var/log/journal already exists". With VOLATILE_LOG_DIR=yes it never can;
+# with "no", systemd_255.21.bb:314 takes the other branch and chowns
+# /var/log/journal *if it is there* — whether poky's build actually creates
+# it is not obvious from the recipe, so this is stated as a question, not a
+# fact. Answer it on the target with:
+#
+#     ls -d /var/log/journal && journalctl --disk-usage
+#
+# If it IS persistent that is a real asset for this product: a headless
+# board with no serial adapter attached can be power-cycled, the card
+# pulled, and the last boot read offline with `journalctl -D
+# /mnt/var/log/journal`. It is also unbounded SD wear, so SystemMaxUse=
+# would follow. If it is NOT persistent and we want that debugging path,
+# the knob is Storage=persistent in a journald.conf.d drop-in.
+# Deliberately unset either way until the first boot answers it.
 VOLATILE_LOG_DIR = "no"
 
 # --- What is deliberately absent, and why -----------------------------------
