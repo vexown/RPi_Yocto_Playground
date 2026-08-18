@@ -117,9 +117,13 @@ in ~10-15 s):
       rewritten in C (9.6 KB binary), udev rule instantiates a systemd
       template unit per device, `BindsTo=` replaces the crash loop; verified
       on the Pi 5 2026-08-17 (notes/19)
-- [ ] Measure, then optimize: trim kernel config, quiet boot, static IP option
-      (levers identified and deliberately unpulled until there is a number —
-      list in notes/20)
+- [ ] Measure, then optimize — **first boot on Yocto: 22.66 s** (4.57 s
+      kernel + 18.09 s userspace) vs the 86.9 s Raspberry Pi OS baseline,
+      2026-08-18 (notes/20). Board is on WiFi and reachable over SSH.
+      Not ticked: that is a *first* boot (carries dropbearkey 4.7 s), and
+      the critical chain is a single 17 s gap between the kernel finding
+      the SDIO chip at 4.3 s and brcmfmac probing it at 21.3 s. Remaining
+      levers and their reasoning are listed in notes/20.
 - [ ] Read-only rootfs so yanking power can't corrupt the SD card
 
 ## Notes
