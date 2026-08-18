@@ -362,39 +362,271 @@ as `setup-yocto.sh`.
 
 ---
 
+## 8. First flash: three causes, none of them visible from the rootfs
+
+The board booted on the first flash and had no `wlan0`. The ACT LED was
+solid green, which is worth knowing means **nothing**: on a Zero W it is
+consistent with "the firmware loaded bootcode.bin and stopped" and with
+"Linux booted fine and nothing is touching the SD card". Guessing from it
+would have cost reflashes.
+
+`scripts/card-postmortem.sh` (new this session) reads the card on the PC.
+`/etc/machine-id` was committed and there were journal files, so PID 1 had
+run and the whole firmware-level suspect list — including the `vc4-kms-v3d`
+overlay I had confidently nominated — was dead in one line.
+
+### Cause 1: a module that only exists at runtime
+
+```
+brcmfmac: brcmf_fw_alloc_request: using brcm/brcmfmac43430-sdio for chip BCM43430/1
+brcmfmac: brcmf_fwvid_request_module: mod=wcc: failed 256
+ieee80211 phy0: brcmf_attach: brcmf_fwvid_attach failed
+```
+
+Linux 6.6 split brcmfmac's vendor-specific code into `brcmfmac-wcc`,
+`brcmfmac-bca` and `brcmfmac-cyw`. The core module attaches to the SDIO
+device, reads the chip ID, decides BCM43430 is a **wcc** part, and then
+`request_module()`s that one *at runtime*.
+
+Read the first line again: `brcmf_fw_alloc_request` succeeded. The
+firmware blob was fine. A missing kernel module produced an error message
+that looks like a firmware problem.
+
+**This is the bill for naming modules explicitly instead of installing
+`kernel-modules`.** That decision was right and stays — it is most of the
+59.4 → 45.9 MB — but the cost is precisely this: a `request_module()`
+dependency resolved at runtime is invisible to every static check in
+section 5. You cannot find it by reading the rootfs. Only a boot finds it.
+That is a real limit of the method, discovered about two hours after
+writing the method down.
+
+### Cause 2: no regulatory database
+
+```
+platform regulatory.0: Direct firmware load for regulatory.db failed with error -2
+```
+
+`wireless-regdb-static` was missing (the files are in the `-static`
+package, not the main one — the main one serves the obsolete CRDA
+userspace path). Without it the kernel uses the built-in conservative
+"world" domain: reduced TX power, and channels 12-13 unusable in 2.4 GHz.
+`country=PL` in the wpa config has nothing to look itself up in. On a
+router parked on 12 or 13 that alone prevents association.
+
+### Cause 3: wic appends to fstab without looking
+
+```
+systemd-fstab-generator[77]: Failed to create unit file
+  '/run/systemd/generator/boot.mount', as it already exists.
+  Duplicate entry in '/etc/fstab'?
+(sd-exec-[75]: systemd-fstab-generator failed with exit status 1.
+```
+
+Not a warning — **exit 1**, abandoning the whole fstab-to-units
+translation for that boot. On the card:
+
+```
+/dev/mmcblk0p1       /boot   vfat   defaults,nofail  0  0     <- ours
+/dev/mmcblk0p1	/boot	vfat	defaults	0	0             <- wic's
+```
+
+`update_fstab()` in `poky/scripts/lib/wic/plugins/imager/direct.py` loops
+over every partition with a mountpoint other than `/` and appends a line,
+with no check for whether that mountpoint is already present. This only
+bites because we HAVE a hand-written fstab; on a stock image wic's line is
+the only one, which is why it is not a known trap.
+
+Fixed with `WIC_CREATE_EXTRA_ARGS += " --no-fstab-update"`. Note the
+per-partition `--no-fstab-update` in `ksparser.py` exists but that loop
+never consults it in scarthgap — the working switch is the wic
+command-line option, which `image_types_wic.bbclass:73` passes through.
+Keeping our fstab authoritative was the point: it documents why each line
+exists and it applies to every image type, not only the `.wic`.
+
+### And the post-mortem tool lied
+
+It reported both provisioned files MISSING on a card that had them.
+`/etc/wpa_supplicant` is 0700 and `/root` is 0700, so `[ -f ]` as an
+ordinary user returns false on a path it cannot read. **A test that cannot
+distinguish "absent" from "unreadable" is not a test — it is a coin flip
+that lies with confidence.** Those checks run under sudo now and report
+the difference explicitly.
+
+---
+
+## 9. It works. 22.7 s, and where the rest of it goes
+
+First boot after the fixes:
+
+```
+Startup finished in 4.566s (kernel) + 18.093s (userspace) = 22.660s
+multi-user.target reached after 17.745s in userspace.
+```
+
+Against the **86.9 s** baseline. `systemctl --failed` empty, fstab
+generator silent, regulatory database loading, NTP synchronised.
+
+Caveat on that number, caught by `journalctl --list-boots` showing a
+single boot: it is a FIRST boot and still carries first-boot costs —
+`dropbearkey.service` alone is 4.733 s in `systemd-analyze blame`, and it
+never runs again.
+
+### The critical chain is one wait
+
+```
+multi-user.target @17.745s
+`-wpa_supplicant@wlan0.service @17.699s
+  `-sys-subsystem-net-devices-wlan0.device @17.632s
+```
+
+NetworkManager's 43 s is gone and dropbear is not on the chain at all —
+socket activation working exactly as designed. What replaced it is the
+WiFi chip appearing.
+
+Worth being precise about what is even being measured. `systemd-analyze`
+reports time to `multi-user.target`. This product is *usable* when it is
+reachable over SSH and logging; the logger needs no network and dropbear's
+socket opens far earlier. So the user-facing number is "time to wlan0 plus
+DHCP", which is the same figure. Optimising `multi-user.target` and
+optimising the product happen to coincide here — but only by accident, and
+it is worth checking that assumption again after each change.
+
+### The 17-second hole
+
+```
+[  4.260] mmc1: new high speed SDIO card at address 0001   <- chip found
+                        ... 17 seconds ...
+[ 21.269] brcmfmac: F1 signature read @0x18000000          <- driver probes it
+[ 21.655] Firmware: BCM43430/1 wl0 ... version 7.45.98     <- blob loads in 0.4 s
+[ 23.808] CTRL-EVENT-CONNECTED                             <- associated
+[ 31.163] DHCPv4 address 192.168.50.34 acquired
+```
+
+The hardware is present at 4.3 s. The driver does not touch it until
+21.3 s. Everything after that is quick. **Essentially the whole boot
+problem is one gap in which nothing visible happens.**
+
+What is in the gap: `cfg80211`, `brcmutil`, `brcmfmac` and
+`brcmfmac-wcc` are all `=m` and all xz-compressed
+(`CONFIG_MODULE_COMPRESS_XZ=y`), loaded by udev off a slow SD card and
+decompressed on one 1 GHz ARM11 core. `cfg80211.ko.xz` is 223 KB
+compressed on its own.
+
+Corroborating smell: `Expecting device /dev/mmcblk0p1` at 6.9 s →
+`Found device` at **17.4 s**. That is the FAT partition, trivially
+present. Ten seconds for udev to reach it.
+
+### Two things removed immediately, because they are waste rather than tuning
+
+**busybox-syslog.** Every kernel line appears twice in the journal:
+
+```
+[21.268867] kernel:      brcmfmac: F1 signature read ...
+[21.281007] kernel[181]: [21.268867] brcmfmac: F1 signature read ...
+```
+
+PID 181 is busybox klogd re-reading the ring buffer journald already read
+from `/dev/kmsg`, so journald writes every kernel message to the SD card
+twice. Worse than redundant: the duplicates of the 0-4 s messages arrive
+at monotonic 18-19 s, so klogd spends the first eighteen seconds of boot
+replaying the buffer on the only core. Present solely because
+`packagegroup-core-boot` RRECOMMENDS `${VIRTUAL-RUNTIME_base-utils-syslog}`
+(`default-providers.inc:31`), a default older than systemd being normal.
+`systemd-journald-dev-log.socket` already provides `/dev/log`. Dropped via
+`BAD_RECOMMENDATIONS`, the image-level knob for refusing an RRECOMMENDS
+without editing the packagegroup that made it. (rpm and ipk only —
+`rootfs_deb.bbclass:19` warns and ignores it.)
+
+**DISABLE_VC4GRAPHICS.** No display is ever attached. Recorded plainly:
+this overlay was my leading suspect for the board not booting and I was
+wrong. Removing it is an optimisation on its own merits.
+
+### Still to try, biggest first
+
+1. `CONFIG_MODULE_COMPRESS_NONE` — cheap, low risk, pure CPU saving,
+   costs rootfs size.
+2. `cfg80211`/`brcmutil`/`brcmfmac` built in (`=y`) — removes udev and
+   modprobe from the path entirely; the chip would probe during kernel
+   init right after `mmc1` appears at 4.3 s. **Caveat stated up front: a
+   built-in brcmfmac requests firmware during kernel init, possibly before
+   the rootfs is mounted.** It uses the async firmware API and normally
+   copes, but "normally" is not "verified", and the fallback is
+   `CONFIG_EXTRA_FIRMWARE` or an initramfs, both of which cost more than
+   they look. Hence #1 first.
+3. **DHCP took 7.4 s** (carrier 23.8 → address 31.2) — about a third of
+   the remaining budget, and completely uninvestigated.
+
+These are deliberately not bundled together. Each gets measured on its
+own, or we learn a total and not a cause.
+
+### Two observations, neither urgent
+
+The AP overrides our regulatory domain: `alpha2=PL` from our config, then
+`init=COUNTRY_IE type=COUNTRY alpha2=DE` from the router's beacon. So
+`country=` in the wpa config is not the final word.
+
+`timedatectl` reports synchronised with NTP active, so the missing RTC
+self-corrects once the network is up. Log filenames created before that
+still carry a bogus date — the journal pulled off the card was stamped
+May 2025 for exactly this reason. A real design question for the logger,
+not yet answered.
+
+---
+
 ## Next
 
-1. **Flash and provision.** `./scripts/flash-sd.sh /dev/sdX rpi0`, then
-   `./scripts/provision-card.sh /dev/sdX`. The PSK and SSH key come from
-   `~/.rpi0-secrets/`, outside this public repo; the script refuses to run
-   if `SECRETS_DIR` points inside it.
-2. **First boot: does it come up on WiFi, and how fast?** That is the
-   capstone's headline number against the 86.9 s baseline.
-   If it does not appear on the LAN, the card is the debugger — mount p2
-   and read `/var/log/journal` offline.
-3. **Measure, then optimize** (checkbox 5). Levers identified and
-   deliberately not yet pulled, all of them wanting a number first:
-   - `dtoverlay=vc4-kms-v3d` is in config.txt on a headless board
+1. **Get a clean second-boot number.** Everything measured so far is a
+   first boot and carries `dropbearkey` (4.7 s) and postinsts. Rebuild
+   with the busybox-syslog and vc4 removals first, so the number is a
+   fresh starting point rather than a mid-change one.
+2. **Attack the 17-second hole**, one change at a time so each has a
+   measured value: module compression off, then the WiFi stack built into
+   the kernel. Then look at the 7.4 s DHCP, which nobody has examined.
+3. **The logger has never been exercised on this board.** Everything so
+   far is OS bring-up. Plug the Debugprobe into the data port and confirm
+   the udev rule fires, the template instantiates, and a file appears
+   under `/var/log/serial-logger/`. It works on the Pi 5 (notes/19); it
+   has not been shown to work here.
+4. **Remaining levers, still wanting a number first:**
    - the `rauc` DISTRO_FEATURE still adds dm-verity/squashfs/loop/nbd to a
      kernel on a board with no A/B layout
    - poky's desktop `DISTRO_FEATURES` (`libx11`, `libxcb`,
      `kbd-consolefonts`, `keymaps`) on a board with no display
    - `systemd-networkd-wait-online.service` is enabled; nothing should be
      pulling `network-online.target`, but confirm
-   - journald `SystemMaxUse=`
-   - static IP instead of DHCP
+   - journald `SystemMaxUse=` — the journal is persistent now
+   - a static IP, or at least a DHCP reservation on the router
    - `systemd-analyze` comes back out of the image once measuring is done
-4. **Read-only rootfs** (checkbox 6). This is where the persistent-log
+   - `DISTRO_CODENAME` still says "rpi5-era" on a Zero W
+5. **Read-only rootfs** (checkbox 6). This is where the persistent-log
    decision gets revisited properly: a separate data partition answers
    read-only rootfs and log durability with one change.
 
+### The confound to keep in mind
+
+The SD card is one the user had already retired as unreliable on a Pi 4B,
+kept only because no other card was to hand. It has already produced one
+0.2 W dead boot that a re-seat fixed. `dev-mmcblk0p2.device` taking 10.4 s
+and udev needing 10 s to notice the FAT partition are both consistent with
+a slow or marginal card as much as with a slow CPU. **Before concluding
+anything about I/O timing, retest on a known-good card.** No amount of
+config bisection out-argues flaky media.
+
 ## State things were left in
 
-- `rpi0-logger-image` built for `raspberrypi0-wifi`, **never flashed**.
-  45.9 MB compressed, 112 packages.
-- The deployed Zero W still runs Raspberry Pi OS Lite, untouched apart
-  from the SSH key added in session 14. Still crash-looping deliberately.
-- Rollback point for the whole capstone remains
+- **The Zero W now runs Yocto.** Flashed, provisioned, on WiFi at
+  192.168.50.34, reachable over SSH as root with `~/.ssh/pi_zero_key`.
+  22.66 s first boot vs the 86.9 s Raspberry Pi OS baseline.
+- Raspberry Pi OS Lite is off the board. Rollback for the whole capstone
+  is still one `dd` away:
   `/media/blankmcu/EmbeddedLinux/backups/rpi0-pios-lite-2026-08-17.img.gz`.
-- `~/.rpi0-secrets/wpa_supplicant-wlan0.conf` does **not exist yet** —
-  `provision-card.sh` prints the exact commands to create it on first run.
+- The image in the build dir is one rebuild AHEAD of what is on the card —
+  it now has `BAD_RECOMMENDATIONS += "busybox-syslog"` and
+  `DISABLE_VC4GRAPHICS = "1"`, neither of which has been flashed or
+  measured.
+- `~/.rpi0-secrets/wpa_supplicant-wlan0.conf` exists and works. It is
+  outside the repo and stays there.
+- `~/.ssh/config`'s `Host rpi0` entry still says `User blankmcu`, which
+  does not exist on this image. Either `User root` or connect with
+  `root@192.168.50.34`. The IP is a DHCP lease and will drift.
+- The serial logger itself has **not been exercised on this board yet.**
