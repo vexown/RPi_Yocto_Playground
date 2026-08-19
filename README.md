@@ -117,12 +117,17 @@ in ~10-15 s):
       rewritten in C (9.6 KB binary), udev rule instantiates a systemd
       template unit per device, `BindsTo=` replaces the crash loop; verified
       on the Pi 5 2026-08-17 (notes/19)
-- [ ] Measure, then optimize — **22.058 s** (4.72 s kernel + 17.34 s
-      userspace) vs the 86.9 s Raspberry Pi OS baseline, 2026-08-18
-      (notes/20). Board is on WiFi and reachable over SSH. Not ticked:
-      the critical chain is a single 17 s gap between the kernel finding
-      the SDIO chip at 4.3 s and brcmfmac probing it at 21.3 s, and
-      nothing else is on it. Remaining levers in notes/20.
+- [ ] Measure, then optimize — **21.95 s** (4.57 s kernel + 17.38 s
+      userspace) vs the 86.9 s Raspberry Pi OS baseline; noise floor
+      ±0.11 s over four boots, 2026-08-19 (notes/20, notes/21). Board is
+      on WiFi and reachable over SSH. Not ticked: the critical chain is a
+      single gap between the kernel finding the SDIO chip at 4.3 s and
+      brcmfmac probing it at 20.6 s. Profiled in session 16 — the boot is
+      **work-bound, not wait-bound**: 21.4 s busy against 0.6 s idle on
+      one ARM11 core, 97% saturated. Module compression (0.15 s), console
+      cost (no framebuffer) and SD throughput (21 MB/s) all ruled out;
+      `force_turbo=1` changed nothing because `ondemand` was already at
+      1000 MHz. Four levers and the remaining candidates in notes/21.
 - [ ] Read-only rootfs so yanking power can't corrupt the SD card
 
 ## Notes

@@ -1,12 +1,13 @@
 # rpi0-network_1.0.bb — the Zero W's entire network stack configuration.
 #
-# Four small files, and between them they replace NetworkManager:
+# Five small files, and between them they replace NetworkManager:
 #
 #   20-wlan0.network             layer 3 (address, route, DNS) via networkd
 #   97-rpi0-logger-net.preset    switches on the supplicant template
 #   10-default-instance.conf     drop-in saying WHICH instance that means
 #   wpa_supplicant-wlan0.conf.example   documentation of the file we refuse
 #                                       to ship
+#   10-wifi-early.conf           loads brcmfmac at 8 s instead of 17 s
 #
 # The last two are one mechanism split across two files, and the split is
 # not decoration — see 10-default-instance.conf for the silent no-op that
@@ -30,6 +31,7 @@ SRC_URI = "file://20-wlan0.network \
            file://97-rpi0-logger-net.preset \
            file://10-default-instance.conf \
            file://wpa_supplicant-wlan0.conf.example \
+           file://10-wifi-early.conf \
            "
 
 S = "${WORKDIR}"
@@ -89,6 +91,21 @@ do_install() {
     install -d -m 0700 ${D}${sysconfdir}/wpa_supplicant
     install -m 0600 ${S}/wpa_supplicant-wlan0.conf.example \
         ${D}${sysconfdir}/wpa_supplicant/
+
+    # modules-load.d, in the VENDOR directory (/usr/lib), for the same
+    # reason the preset and the drop-in live there: this is a statement
+    # by the image about how it wants to boot, not a policy the operator
+    # of a particular box chose. systemd-modules-load.service reads
+    # /etc/modules-load.d first, so an admin who disagrees can shadow this
+    # by dropping a file of the same name into /etc and win.
+    #
+    # ${nonarch_libdir} rather than ${libdir}: on a multilib build
+    # ${libdir} can become /usr/lib64, and systemd looks in /usr/lib
+    # regardless of word size. Configuration is not architecture-specific
+    # and must not follow the library path.
+    install -d ${D}${nonarch_libdir}/modules-load.d
+    install -m 0644 ${S}/10-wifi-early.conf \
+        ${D}${nonarch_libdir}/modules-load.d/
 }
 
 # Default FILES:${PN} covers ${sysconfdir} but NOT ${systemd_unitdir}
@@ -102,6 +119,7 @@ do_install() {
 # overly greedy FILES is how two packages end up fighting over a directory.
 FILES:${PN} += "${systemd_unitdir}/system-preset \
                 ${systemd_system_unitdir}/wpa_supplicant@.service.d \
+                ${nonarch_libdir}/modules-load.d \
                 "
 
 # The .network file is genuinely the administrator's to edit — mark it so

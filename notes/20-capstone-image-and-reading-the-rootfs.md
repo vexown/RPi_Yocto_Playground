@@ -511,6 +511,18 @@ conflating the two is how people spend a week making a boot 0.6 s faster.
 (`dev-mmcblk0p2.device` did drop 10.4 s → 8.5 s between the two boots
 without the total following it, which is the same lesson a second time.)
 
+> **Corrected in session 16 — see notes/21 §4.** The corollary above is
+> wrong on this board, and wrong for an instructive reason. It assumes
+> off-chain work is free because it runs on another core. This board has
+> one core, and measurement showed it ~97% saturated for the whole boot
+> (21.4 s busy, 0.6 s idle, 0.56 s iowait). At that saturation every
+> off-chain unit is stealing CPU from the chain, so removing *any* work
+> moves the total roughly one-for-one. The `blame`-vs-`critical-chain`
+> distinction stated above is still correct — `blame` still cannot tell
+> you what is *gating*. What is wrong is the conclusion drawn from it.
+> The question that should have come first: **is this boot waiting, or is
+> it working?**
+
 ### The critical chain is one wait
 
 ```
