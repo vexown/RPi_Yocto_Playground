@@ -106,6 +106,38 @@ ROOT="$(resolve_part "$P2" "$MNT/root")" || true
 [ -n "$ROOT" ] || { echo "    !!! could not read $P2"; exit 1; }
 echo "    (reading $P2 at $ROOT)"
 
+# WHICH IMAGE IS THIS? Ask before diagnosing anything.
+#
+# Added 2026-08-19, after this script confidently reported "VOLATILE_LOG_DIR
+# did not take" about a card that was carrying an entirely different image
+# -- the Pi 5's playground-image, written to the Zero W's card because
+# flash-sd.sh used to default its target. Every check below is written
+# against the expectations of rpi0-logger-image, so every one of them
+# produced a plausible, confident, wrong answer.
+#
+# A diagnostic that does not first establish what it is looking at is not
+# diagnosing, it is pattern-matching against an assumption. Same lesson as
+# the 0700-directory bug in section 4: a test that cannot tell "wrong" from
+# "different" will lie with confidence.
+echo "--- which image is on this card? ---"
+# /etc/os-release is 0644 by design, so no sudo here -- unlike section 4,
+# which reads files inside 0700 directories and genuinely needs it.
+if [ -r "$ROOT/etc/os-release" ]; then
+    sed -n 's/^PRETTY_NAME=//p;s/^VERSION_ID=/version: /p' \
+        "$ROOT/etc/os-release" | tr -d '"' | sed 's/^/    /'
+else
+    echo "    (no readable /etc/os-release)"
+fi
+# The kernel filename in the boot partition is the giveaway that matters:
+# the firmware picks it by SoC, so kernel_2712.img means a Pi 5 image and
+# kernel.img means an ARMv6 Pi Zero / Pi 1 image. Mismatched against the
+# board you are holding, nothing else in this report is meaningful.
+echo "    boot partition carries: $(ls "$BOOT" 2>/dev/null | grep -E '^kernel.*\.img$' | tr '\n' ' ')"
+case "$(ls "$BOOT" 2>/dev/null | grep -cE '^kernel\.img$')" in
+    0) echo "    !!! no plain kernel.img -- this is NOT an ARMv6 (Pi Zero/Pi 1) image" ;;
+esac
+echo
+
 # /etc/machine-id is the cleanest single marker. The image ships it EMPTY
 # (image.bbclass creates it so a read-only rootfs can boot); systemd writes
 # a real 32-hex-digit id into it the first time PID 1 runs far enough. So:

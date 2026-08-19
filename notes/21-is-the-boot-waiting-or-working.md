@@ -505,10 +505,105 @@ For any boot-time work on any board:
    fine; random I/O and reliability are untested, and this is still a card
    retired from a Pi 4B for being flaky.
 
+## 10. The flash that wasn't
+
+The reflash did not happen. The board came up blinking and never appeared
+on the router, and the post-mortem said why in its first four lines:
+
+```
+--- config.txt (non-comment lines) ---
+    dtoverlay=vc4-kms-v3d
+    dtparam=act_led_trigger=heartbeat
+    dtoverlay=playground-led
+--- kernel present? ---
+    /media/blankmcu/boot/kernel_2712.img
+```
+
+`kernel_2712.img` is a BCM2712 kernel and `rootfs_A` is a RAUC A/B label.
+The Zero W's card had **the Pi 5's `playground-image`** on it. An ARMv6
+board never finds a kernel it can run, so userspace never starts, so there
+is no journal and no wifi. The blinking LED was a firmware error pattern,
+not the heartbeat trigger that config.txt asks for.
+
+Cause, and it was mine:
+
+```sh
+case "${2:-}" in
+    rpi0)  TARGET="rpi0"; IMAGE_NAME="${3:-rpi0-logger-image}" ;;
+    rpi5)  TARGET="rpi5"; IMAGE_NAME="${3:-playground-image}" ;;
+    ""|*)  TARGET="rpi5"; IMAGE_NAME="${2:-playground-image}" ;;   # <-- this
+esac
+```
+
+`flash-sd.sh` defaulted its target. Omit the word `rpi0` and it silently
+chose a board for you and wrote 45 MB of it to a raw block device.
+
+That default was written in session 15, when it was harmless: there was
+one board. **A convenience default is only a convenience while there is
+one possible answer.** The moment the second target existed, the default
+stopped being a shortcut and became a way to flash the wrong image without
+being told. The target is now mandatory and the script refuses without it.
+
+### The post-mortem tool lied again, the same way as last time
+
+Section 2 of the report said:
+
+```
+/etc/machine-id: EMPTY -> systemd did not get far enough to commit one
+/var/log is a: SYMLINK (volatile! VOLATILE_LOG_DIR did not take)
+```
+
+Both statements are confident, plausible, and about the wrong image.
+`playground-image` has no `VOLATILE_LOG_DIR = "no"`, so a volatile
+`/var/log` is exactly correct there — the tool reported a *setting we
+never applied to this image* as a *setting that failed*.
+
+This is the second time this script has done this. In notes/20 §8 it
+reported both provisioned files MISSING because it could not read inside
+0700 directories, and the lesson recorded then was: *a test that cannot
+distinguish "absent" from "unreadable" is a coin flip that lies with
+confidence.* The same lesson, one level up: **a diagnostic that does not
+first establish what it is looking at is not diagnosing, it is
+pattern-matching against an assumption.**
+
+Fixed by making section 2 open with the image's identity before any
+judgement:
+
+```
+--- which image is on this card? ---
+    version: 0.3
+    Playground 0.3 (rpi5-era)
+    boot partition carries: kernel_2712.img
+    !!! no plain kernel.img -- this is NOT an ARMv6 (Pi Zero/Pi 1) image
+```
+
+The kernel filename is the check that matters, because the firmware picks
+it by SoC: `kernel.img` is ARMv6, `kernel_2712.img` is a Pi 5. If that is
+wrong for the board in your hand, nothing else in the report means
+anything.
+
+Small irony worth keeping: `DISTRO_CODENAME` still says `rpi5-era`, a nit
+sitting unfixed on notes/20's list since session 15, and it is the line
+that names the culprit fastest.
+
+---
+
 ## State things were left in
 
 - Zero W on WiFi at 192.168.50.34, SSH as root with `~/.ssh/pi_zero_key`.
 - `force_turbo=1` added to `/boot/config.txt` as an experiment and rolled
   back; `/boot/config.txt.bak` restored over it.
 - Baseline to beat: **21.946 s**, noise floor ±0.11 s.
-- Build directory carries three changes not yet on the card.
+- Build directory carries three changes, **built and verified in the
+  rootfs but NOT yet flashed** — the flash went to the wrong image. The
+  artifacts were checked before flashing and all three are correct:
+  `/usr/lib/modules-load.d/10-wifi-early.conf` contains `brcmfmac`, no
+  `syslogd`/`klogd` in the 113-package manifest, and `config.txt` is down
+  to `enable_uart=1` with the vc4 overlay gone.
+- **The Zero W's card currently holds the Pi 5 image and must be
+  reflashed**, with the target spelled out:
+  `./scripts/flash-sd.sh /dev/sdX rpi0` then
+  `./scripts/provision-card.sh /dev/sdX`. Then boot twice and measure the
+  second boot.
+- `flash-sd.sh` now requires the target argument; `card-postmortem.sh` now
+  identifies the image before diagnosing it.

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Flash the latest Yocto image onto an SD card.
 #
-# Usage:  ./scripts/flash-sd.sh /dev/sdX [rpi5|rpi0] [image-name]
+# Usage:  ./scripts/flash-sd.sh /dev/sdX <rpi5|rpi0> [image-name]   (target REQUIRED)
 #         (find your SD card device with `lsblk -d -o NAME,SIZE,TRAN,MODEL`)
 #
 #   rpi5 (default) -> build-rpi5, MACHINE=raspberrypi5,      playground-image
@@ -44,12 +44,31 @@ set -e
 
 DEVICE="$1"
 
-# Decide which build directory we are flashing from. "rpi5"/"rpi0" in $2
-# selects a target; anything else in $2 is a legacy image name.
+# Decide which build directory we are flashing from.
+#
+# THE TARGET IS MANDATORY. It used to default to rpi5 when $2 was omitted,
+# which is how, on 2026-08-19, the Pi 5's playground-image (BCM2712 kernel,
+# RAUC A/B layout) got written onto the Zero W's card. The board sat there
+# blinking a firmware error pattern; the post-mortem tool reported an empty
+# machine-id and no journal and blamed VOLATILE_LOG_DIR, because it had also
+# assumed which image it was looking at. Roughly an hour went into a problem
+# that a missing word on the command line had already caused.
+#
+# A convenience default is only a convenience while there is one possible
+# answer. The moment a second board exists, defaulting means the script
+# silently picks a board on your behalf and then writes 45 MB of it to a
+# raw device. Refuse instead.
 case "${2:-}" in
-    rpi0)       TARGET="rpi0"; IMAGE_NAME="${3:-rpi0-logger-image}" ;;
-    rpi5)       TARGET="rpi5"; IMAGE_NAME="${3:-playground-image}" ;;
-    ""|*)       TARGET="rpi5"; IMAGE_NAME="${2:-playground-image}" ;;
+    rpi0)  TARGET="rpi0"; IMAGE_NAME="${3:-rpi0-logger-image}" ;;
+    rpi5)  TARGET="rpi5"; IMAGE_NAME="${3:-playground-image}" ;;
+    "")    echo "ERROR: no target given."
+           echo "Usage: $0 /dev/sdX <rpi0|rpi5> [image-name]"
+           echo "  rpi0 -> MACHINE=raspberrypi0-wifi, default image rpi0-logger-image"
+           echo "  rpi5 -> MACHINE=raspberrypi5,      default image playground-image"
+           exit 1 ;;
+    *)     echo "ERROR: unknown target: $2 (expected rpi0 or rpi5)."
+           echo "The image name, if you need one, is the THIRD argument."
+           exit 1 ;;
 esac
 
 case "$TARGET" in
@@ -62,7 +81,7 @@ IMAGE_DIR="/media/blankmcu/EmbeddedLinux/yocto/build-$TARGET/tmp/deploy/images/$
 IMAGE="$IMAGE_DIR/$IMAGE_NAME-$MACHINE.rootfs.wic.bz2"
 
 if [ -z "$DEVICE" ]; then
-    echo "Usage: $0 /dev/sdX"
+    echo "Usage: $0 /dev/sdX <rpi0|rpi5> [image-name]"
     echo
     echo "Removable devices currently attached:"
     lsblk -d -o NAME,SIZE,TRAN,MODEL,RM | awk 'NR==1 || $NF==1'
