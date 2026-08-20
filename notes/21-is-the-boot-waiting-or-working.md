@@ -325,10 +325,42 @@ never appears on the critical chain.
 ### 4. Do it first
 
 This is the one that does not occur to you until you have the saturation
-number, and on this board it is the biggest.
+number. It is also the one that is easiest to misjudge, because whether it
+is worth anything at all depends entirely on **which clock you are reading**.
 
-Total work is roughly fixed, but **the goal is not "finish all the work"**.
-On this image `multi-user.target` waits on exactly one thing:
+**"Boot time" is not one number.** There are at least two, and they behave
+in opposite ways:
+
+| clock | what it measures | effect of lever 4 |
+|---|---|---|
+| time-to-all-work-done | what `systemd-analyze` prints: when the **last** unit in the boot transaction finishes | **exactly zero, always** |
+| time-to-goal | when the device does the job it was built for — here, `wlan0` has an IP and the logger can ship data | **the strongest lever available** |
+
+On a saturated core, time-to-all-work-done *is* total work W. Reordering
+conserves W. So lever 4 cannot move that number by a millisecond, and any
+experiment graded on it will report lever 4 as a failure.
+
+Time-to-goal is a different quantity entirely:
+
+```
+time-to-goal = work(the goal's dependencies)
+             + work scheduled ahead of the goal that the goal does not need
+```
+
+That second term is pure waste, and deleting it is exactly what lever 4
+does.
+
+> One cashier, a hundred items in the queue. The queue empties at the same
+> moment no matter what order you ring things up — that is W, and it is
+> fixed. But if you only care about *your* item, being served first instead
+> of ninety-ninth is the whole game. Lever 4 does not shorten the queue.
+> It moves you to the front of it.
+
+Levers 1–3 shrink the pie. Lever 4 changes which slice you eat first, and
+costs nothing at all — but only the second clock can see it.
+
+**On this image**, before the change, `multi-user.target` waited on exactly
+one thing:
 
 ```
 multi-user.target @17.094s
@@ -337,12 +369,22 @@ multi-user.target @17.094s
 ```
 
 `wlan0` does not exist until `brcmfmac` probes. Everything else the core
-does before that is, from the finishing line's point of view, in the way.
-Even at constant total work, moving the chain to the front of the queue
-moves the finish.
+does before that is, from the goal's point of view, in the way.
 
-Levers 1–3 shrink the pie. Lever 4 changes which slice you eat first, and
-costs nothing at all.
+> **Corrected in session 17 — see notes/22.** Where this box now stands,
+> the note used to claim: *"even at constant total work, moving the chain to
+> the front of the queue moves the finish."* That is true of time-to-goal
+> and **false** of `systemd-analyze`'s finish line, and the original text
+> conflated the two — which is the whole reason lever 4 looked like a null
+> result when it was measured.
+>
+> The data settled it. `10-wifi-early.conf` moved `wlan0.device` from
+> 21.50 s to **14.24 s** monotonic and removed it from the critical chain
+> altogether. The printed total moved 0.616 s, **all** of which is
+> attributable to the two lever-1 changes shipped alongside it (`vc4` and
+> `busybox-syslog`, both confirmed absent from the kernel log).
+>
+> Lever 4 worked exactly as designed, and scored zero on the wrong exam.
 
 ---
 

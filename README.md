@@ -117,17 +117,23 @@ in ~10-15 s):
       rewritten in C (9.6 KB binary), udev rule instantiates a systemd
       template unit per device, `BindsTo=` replaces the crash loop; verified
       on the Pi 5 2026-08-17 (notes/19)
-- [ ] Measure, then optimize — **21.95 s** (4.57 s kernel + 17.38 s
-      userspace) vs the 86.9 s Raspberry Pi OS baseline; noise floor
-      ±0.11 s over four boots, 2026-08-19 (notes/20, notes/21). Board is
-      on WiFi and reachable over SSH. Not ticked: the critical chain is a
-      single gap between the kernel finding the SDIO chip at 4.3 s and
-      brcmfmac probing it at 20.6 s. Profiled in session 16 — the boot is
-      **work-bound, not wait-bound**: 21.4 s busy against 0.6 s idle on
-      one ARM11 core, 97% saturated. Module compression (0.15 s), console
-      cost (no framebuffer) and SD throughput (21 MB/s) all ruled out;
-      `force_turbo=1` changed nothing because `ondemand` was already at
-      1000 MHz. Four levers and the remaining candidates in notes/21.
+- [ ] Measure, then optimize — **21.39 s** mean (kernel + userspace,
+      `systemd-analyze`) vs the 86.9 s Raspberry Pi OS baseline; noise
+      floor ±0.12 s over three boots, 2026-08-20 (notes/20, 21, 22).
+      Session 16 profiled it: the boot is **work-bound, not wait-bound**
+      — 21.4 s busy against 0.6 s idle on one ARM11 core, 97% saturated.
+      Module compression (0.15 s), console cost (no framebuffer) and SD
+      throughput (21 MB/s) all ruled out; `force_turbo=1` changed nothing
+      because `ondemand` was already at 1000 MHz. Session 17 shipped three
+      changes for **−0.616 s** (5.5× the noise floor), all of it from
+      dropping the vc4 overlay and `busybox-syslog`. `10-wifi-early.conf`
+      moved `brcmfmac` from 21.3 s to 10.2 s and removed `wlan0.device`
+      from the critical chain, contributing 0 s to the printed total by
+      construction — reordering conserves work (notes/21 §6, corrected).
+      Not ticked, and the reason changed: **`systemd-analyze` is not the
+      goal metric.** The board has no IP until **30.5 s** — 9.3 s of DHCP
+      *after* the reported finish line, currently uninvestigated
+      (notes/22 §4).
 - [ ] Read-only rootfs so yanking power can't corrupt the SD card
 
 ## Notes
