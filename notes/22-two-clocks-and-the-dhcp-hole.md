@@ -169,6 +169,100 @@ The two candidate shapes, which need debug logging to tell apart:
 These have completely different fixes, and no amount of staring at the
 default-level log distinguishes them.
 
+### The answer: neither. It is one lost packet.
+
+`SYSTEMD_LOG_LEVEL=debug` on `systemd-networkd` (drop-in, one boot):
+
+```
+21.166  wlan0: Gained carrier
+21.189  DHCPv4 client: DISCOVER          <- 23 ms after carrier
+21.201  State changed: initialization -> selecting
+        ............... 3.67 s of silence ...............
+24.857  DHCPv4 client: DISCOVER          <- retransmission
+24.864  DHCPv4 client: OFFER             <-  7 ms later
+24.869  DHCPv4 client: REQUEST
+24.872  DHCPv4 client: ACK               <-  3 ms later
+24.884  wlan0: DHCPv4 address 192.168.50.34/24 acquired
+```
+
+**The first DISCOVER gets no reply. The router answers the second in seven
+milliseconds.** The complete DHCP exchange, once it happens, costs 27 ms.
+
+So the gap was never DHCP being slow. It is one dropped frame plus RFC 2131
+retransmission backoff. And a frame dropped 23 ms after `Gained carrier` is
+a race: networkd fires DISCOVER the moment the carrier flag flips, which is
+about when the WPA 4-way handshake completes and before the AP has
+necessarily finished putting the station into its forwarding path.
+
+Both hypotheses above were wrong, and one of them was expensive:
+
+- **The DUID theory is dead.** `ClientIdentifier=mac` was proposed on the
+  grounds that the AP sees an unfamiliar client after every reflash. The AP
+  answered in 7 ms; it has no hesitation about this client whatsoever. The
+  change is still worth making for lease *stability* across reflashes, but
+  it buys **zero** seconds — and had we shipped it blind alongside anything
+  else, the next lucky boot would have been credited to it.
+- **"The router is slow" / "networkd sits on its hands."** Neither. Both
+  parties were prompt. The medium ate the packet.
+
+### Why the printed number stays steady while the goal metric swings
+
+This looks contradictory and is not. The DHCP wait happens **entirely
+outside the window `systemd-analyze` measures**:
+
+```
+20.585  Reached target Multi-User System     <- systemd stops the clock here
+24.884  wlan0: DHCPv4 address acquired       <- 4.3 s later (9.9 s on the other boot)
+```
+
+Nothing in the boot transaction waits for an address. `network-online.target`
+is not pulled in by anything on this image, and `multi-user.target` is
+satisfied by units having *started*, not by the network *working*. The DHCP
+variance is therefore invisible to the total by construction.
+
+**The steadiness of the printed number is not evidence that the boot is
+steady. It is evidence that the unsteady part is outside what is printed.**
+Which is the same reason the module reorder scored zero: we kept measuring a
+window that excludes the thing we care about.
+
+### The goal metric is far noisier than the printed one
+
+| boot | carrier -> address |
+|---|---|
+| first | 21.22 -> 30.51 = **9.29 s** |
+| second | 21.17 -> 24.88 = **3.72 s** |
+
+A 5.6 s swing between two boots of the same image; the slow one almost
+certainly lost two DISCOVERs rather than one.
+
+This matters for every measurement from here on. `systemd-analyze`'s number
+has a **±0.12 s** noise floor. Time-to-goal has a noise floor of **several
+seconds**, and it is *quantised by the retransmission schedule* rather than
+continuous — it does not vary smoothly, it jumps between roughly 3.7 s,
+9.3 s and so on. Comparing two single samples of it would be meaningless.
+N of about 5 is the minimum, and the right summary statistic is probably
+"how often did the first DISCOVER survive", not the mean.
+
+> A slow number and a bimodal number need different experiment designs.
+> The noise floor is not a property of the board; it is a property of the
+> metric.
+
+### Candidate, not yet a conclusion
+
+From the first boot's log, in exactly the window where the DISCOVER dies:
+
+```
+21.234  wlan0: CTRL-EVENT-REGDOM-CHANGE init=COUNTRY_IE type=COUNTRY alpha2=DE
+```
+
+The regulatory domain flips from PL (ours) to DE (the AP's country IE)
+milliseconds after association, and a regdom change can trigger a channel
+list revalidation. That is a plausible mechanism and nothing more. notes/21
+section 3 exists because a story about mechanism was told confidently once
+already and was wrong within ten minutes; this one gets checked against the
+interleaved wpa_supplicant timeline before it goes anywhere near a fix.
+
+
 ---
 
 ## 5. A non-result, recorded so it is not chased again
