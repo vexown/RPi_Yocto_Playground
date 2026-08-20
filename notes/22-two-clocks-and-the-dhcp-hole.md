@@ -247,6 +247,53 @@ N of about 5 is the minimum, and the right summary statistic is probably
 > The noise floor is not a property of the board; it is a property of the
 > metric.
 
+### Five for five: it is not a race
+
+Five debug boots, all of them:
+
+| boot | DISCOVER #1 | DISCOVER #2 | gap | address | #2 -> address |
+|---|---|---|---|---|---|
+| A | 21.189 | 24.857 | 3.668 | 24.884 | 27 ms |
+| B | 21.358 | 25.557 | 4.199 | 25.585 | 28 ms |
+| C | 21.543 | 26.137 | 4.594 | 26.165 | 28 ms |
+| D | 21.226 | 24.256 | 3.030 | 24.278 | 22 ms |
+| E | 21.237 | 25.865 | 4.628 | 25.895 | 30 ms |
+
+**The first DISCOVER is never answered. Not once in five.**
+
+Two clean signatures fall out:
+
+- **Gap = 4.02 s mean, range 3.030–4.628.** That is 4 s ± 1 s of uniform
+  jitter: textbook RFC 2131 retransmission randomization. The variance in
+  time-to-goal is not the network being flaky, it is a *deliberately
+  randomized retry timer*. Which is exactly why the metric is quantised
+  rather than continuous.
+- **Second exchange = 22–30 ms, every time.** DISCOVER, OFFER, REQUEST, ACK
+  in under 30 ms. The server is fast and boringly consistent.
+
+The 9.29 s boot in the table above was therefore two consecutive losses,
+not one slow reply.
+
+**This retires the word "race", which is mine and was wrong.** A race
+sometimes wins. Five out of five is structural: the first attempt is doomed
+by construction on every boot. Whatever the mechanism is, it is not a
+timing coin-flip.
+
+### What is still not known, stated precisely
+
+**We cannot tell from the client side whether the DISCOVER was lost or the
+OFFER was.** A request with no reply produces an identical log signature
+either way. Separating them needs a capture at the AP or on another host on
+the LAN. Everywhere above that says "the DISCOVER is lost" is overreach;
+what is actually known is **"the first exchange fails."**
+
+This also means the regdom-change suspect below is *not* exonerated — it
+happens on every boot too, so it fits determinism as well as anything else
+does. So does "keys not yet fully plumbed into the firmware". The five boots
+cannot separate them, and the image has no tooling to try: 113 packages, no
+`iw`, no `iproute2`, no `tcpdump`. Probing power-save or link state costs a
+rebuild.
+
 ### Candidate, not yet a conclusion
 
 From the first boot's log, in exactly the window where the DISCOVER dies:
@@ -340,10 +387,76 @@ apart, in a stretch of time the tool does not report at all.
 
 ## Next
 
-- Debug-trace the DHCP window and tell hypothesis 1 from hypothesis 2.
-- Lever 1, one at a time, measured separately: `systemd-resolved`,
-  `systemd-timesyncd`, the `rauc` DISTRO_FEATURE, poky's desktop
-  `DISTRO_FEATURES`, journald `Audit=no`.
-- Add a **time-to-goal** measurement to the routine so we stop grading
-  ourselves on the wrong clock. Time from power-on to "wlan0 has an
-  address" is the honest number for this device.
+**Test a static address.** Zero-rebuild experiment — edit the running
+rootfs, reboot. It deletes the problem rather than explaining it: no
+DISCOVER, no retry timer, no ~4 s, and no variance. It also fixes the
+"my IP changes after a reflash" annoyance that started this thread. For a
+logger that must be reachable at a known address it is the right design
+regardless of boot time.
+
+Expected: address configured within milliseconds of carrier at ~21.2 s, so
+time-to-goal goes from ~25.4 s to ~21.3 s. About 4 s, deterministic.
+
+Check first whether .34 is inside the router's DHCP pool; if it is, add a
+reservation or pick an address above the pool.
+
+On the board, one short command per line (see "State" below for why):
+
+```
+rm -rf /etc/systemd/system/systemd-networkd.service.d
+systemctl daemon-reload
+cd /etc/systemd/network
+cp 20-wlan0.network /root/20-wlan0.network.bak
+printf '[Match]\nName=wlan0\n\n' > 20-wlan0.network
+printf '[Network]\nAddress=192.168.50.34/24\n' >> 20-wlan0.network
+printf 'Gateway=192.168.50.1\nDNS=192.168.50.1\n' >> 20-wlan0.network
+printf 'LinkLocalAddressing=no\n' >> 20-wlan0.network
+cat 20-wlan0.network
+```
+
+Measure with:
+
+```
+journalctl -b -o short-monotonic | grep -E 'Gained carrier|wlan0: Configuring'
+```
+
+If it works, fold it into `rpi0-network_1.0.bb` — and note that
+`ClientIdentifier=mac`, proposed in session 16, becomes moot rather than
+merely useless.
+
+Then back to lever 1, one change at a time, measured separately:
+`systemd-resolved` and `systemd-timesyncd` (10.3 s of blame between them),
+the `rauc` DISTRO_FEATURE on a board with no A/B layout, poky's desktop
+`DISTRO_FEATURES`, journald `Audit=no`.
+
+Still completely untouched: **the serial logger has never been exercised on
+this board.** Plug the Debugprobe into the data micro-USB port and confirm
+the udev rule fires, the template unit instantiates, and a file appears
+under `/var/log/serial-logger/`.
+
+---
+
+## State things were left in
+
+- Image on the card is the correct `rpi0-logger-image` with all three
+  session-16 changes. **21.390 s mean**, noise floor ±0.12 s.
+- **The board still has the debug drop-in at
+  `/etc/systemd/system/systemd-networkd.service.d/10-debug.conf`.** It was
+  never removed. Every boot is currently paying for debug-level networkd
+  logging. Remove it first thing.
+- Nothing in the repo changed as a result of the DHCP work — the finding is
+  documented, no config was altered. `20-wlan0.network` in the recipe is
+  still DHCP.
+- Two clocks now in play. Quote the right one: `systemd-analyze` total
+  **21.39 s ± 0.12 s**, time-to-goal **~25.4 s** with several seconds of
+  quantised spread.
+
+---
+
+## Workflow note
+
+Commands pasted into the board's shell must be **one short command per
+line** — no `&&` chains, no heredocs. The copy path prepends two spaces
+(which breaks heredoc terminators: `  CONF` never matches `CONF`) and the
+terminal hard-wraps at ~115 columns, submitting each fragment as its own
+line. Both failure modes cost a round trip this session.
