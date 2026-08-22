@@ -148,12 +148,17 @@ in ~10-15 s):
       login is dropbear) and **`systemd-vconsole-setup` −0.487 s** (a console
       font for a board with no framebuffer since session 17). **21.390 →
       19.472 s** mean over six boots, −1.918 s / 9.0%, carrier at 20.52 s.
-      Both predictions were made from the blame list and both came in low,
-      giving a reusable rule: **blame is an upper bound, expect two thirds** —
-      the rest is run-queue contention, not work. Not ticked: the masks are
-      runtime-only and still need folding into a `systemd_%.bbappend` via
-      `PACKAGECONFIG:remove`, and `systemd-resolved` (5.281 s blame) is
-      untouched (notes/23 §9).
+      Then **`systemd-resolved` −0.788 s** (a caching DNS proxy on a board
+      with one interface and no `resolve` entry in `nsswitch.conf`).
+      **21.390 → 18.684 s**, −2.706 s / 12.7%, carrier 19.72 s ± 36 ms.
+      The interesting result is a rule that broke: after vconsole (63% of
+      blame) and logind (73%) it looked like *blame is an upper bound worth
+      two thirds*, and resolved returned **15%**. Blame cannot distinguish a
+      unit that was **busy** from one that was **blocked**, and only the
+      first kind gives its time back — `CPUUsageNSec` is the candidate
+      discriminator, untested. Not ticked: every change is a runtime `mask`
+      or hand-edit and a reflash loses all of it; it still needs folding into
+      a `systemd_%.bbappend` via `PACKAGECONFIG:remove` (notes/23 §9).
 - [ ] Read-only rootfs so yanking power can't corrupt the SD card
 
 ## Notes

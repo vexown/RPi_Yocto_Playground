@@ -460,36 +460,66 @@ attributed afterwards by signature.
 | session 17 baseline | 3 | 21.390 | 0.125 |
 | + static address | 4 | 21.303 | 0.332 |
 | + `systemd-vconsole-setup` masked | 3 | 20.816 | 0.145 |
-| + `systemd-logind` masked | 6 | **19.472** | 0.518 |
+| + `systemd-logind` masked | 6 | 19.472 | 0.518 |
+| + `systemd-resolved` masked | 4 | **18.684** | 0.259 |
 
 - **`systemd-vconsole-setup`: −0.487 s.** A console font and keymap for a
   board with no monitor, no keyboard and — since session 17 dropped the vc4
   overlay — no framebuffer.
 - **`systemd-logind`: −1.344 s.** The last gate on `multi-user.target`, on a
   board whose only login path is dropbear, which does not use it.
+- **`systemd-resolved`: −0.788 s.** A local caching DNS proxy on a device
+  with one interface, no VPN, no split-DNS, and — decisively — no `resolve`
+  entry in `nsswitch.conf`, so nothing ever reached it through NSS. Its only
+  role was being the address in `/etc/resolv.conf`, forwarding to a router
+  the board can name directly. Replaced with a two-line static
+  `resolv.conf`; `ping example.com` verified before the timings were
+  trusted.
 
-**Cumulative for the session: 21.390 → 19.472, i.e. −1.918 s (9.0%)**, plus
-the 4–9 s taken off time-to-goal by the static address. Carrier now lands at
-**20.517 s** mean over six boots.
+**Cumulative for the session: 21.390 → 18.684, i.e. −2.706 s (12.7%)**, plus
+the 5–11 s taken off time-to-goal by the static address. Carrier now lands at
+**19.723 s** mean over four boots, spread **36 ms**.
 
 ### The blame list as an estimator
 
 Both predictions were made in advance from the blame figure, and both came
 in low:
 
-| unit | blame | actual | ratio |
+| unit | blame | actual | kept |
 |---|---|---|---|
 | `systemd-vconsole-setup` | 0.777 | 0.487 | 63% |
 | `systemd-logind` | 1.853 | 1.344 | 73% |
+| `systemd-resolved` | 5.281 | 0.788 | **15%** |
 
-The gap is contention. A blame number is *wall time inside the unit*, and on
-a core at 97% part of that is the unit sitting in the run queue behind
-others. Deleting the unit deletes its **work**; its share of the queueing
-just redistributes.
+The first two agree, and the reason they fall short of 100% is contention: a
+blame number is *wall time inside the unit*, and on a core at 97% part of
+that is the unit sitting in the run queue behind others. Deleting the unit
+deletes its **work**; its share of the queueing redistributes.
 
-So the working rule, now with two data points behind it: **treat blame as an
-upper bound and expect to keep roughly two thirds.** Useful for ranking
-candidates, useless as a promise.
+After two data points the rule looked like *"expect to keep two thirds"*. It
+was written down as such. Then resolved returned **15%** and the rule broke
+on its first real test.
+
+### Why, and the better rule
+
+Contention is not the only thing inflating a blame number. A unit can also
+be **waiting**. `systemd-resolved` is `Type=notify`, so its blame runs until
+it signals READY — and most of those 5.281 s were spent waiting on things
+(D-Bus, the network) rather than computing. Delete a unit that was waiting
+and you recover almost nothing, because it was never holding the CPU.
+
+So the honest statement is:
+
+> Blame is an upper bound. How much of it you recover depends on whether the
+> unit was **busy** or **blocked**, and blame cannot tell those apart.
+
+Which raises the obvious question — is there something that *can* tell them
+apart, in advance? There is: **`systemctl show -p CPUUsageNSec <unit>`**
+reports CPU time actually consumed. A unit whose CPU time approaches its
+blame was busy and should return most of it; one whose CPU time is a small
+fraction was blocked and will return little. Untested as a predictor. Next
+session should gather it for the remaining candidates and **write the
+predictions down before measuring**, the way these three were.
 
 ---
 
@@ -557,14 +587,28 @@ so the Yocto change only gets written after the number is known:
 
 1. ~~`systemd-vconsole-setup`~~ — done, −0.487 s (§9)
 2. ~~`systemd-logind`~~ — done, −1.344 s (§9)
-3. `systemd-resolved` — 5.281 s blame, the largest left. Check what
-   `/etc/resolv.conf` is first: if it points into `/run/systemd/resolve/`,
-   masking resolved breaks DNS until a static `resolv.conf` replaces it.
-4. `systemd-timesyncd` — 5.160 s blame. The logger needs correct time, so
-   this is about *when* it runs, not whether. Note the RTC-less clock jump
-   in §10 — timestamps before timesync are wrong, which matters for a device
-   whose product is timestamped data.
+3. ~~`systemd-resolved`~~ — done, −0.788 s (§9). `/etc/resolv.conf` was a
+   two-hop alternatives symlink into `/run/systemd/resolve/`; replaced with
+   a static `nameserver 192.168.50.1`.
+4. `systemd-timesyncd` — 5.160 s blame, but see the estimator problem above:
+   this is very likely another *blocked* unit and worth predicting before
+   measuring. It also **must not simply be deleted**. The board has no RTC,
+   its product is timestamped data, and §10 shows every boot starting in May
+   2025 until timesync corrects it. The question is *when* it runs, not
+   whether.
 5. `systemd-udev-trigger` — 3.864 s blame, not yet looked at.
+6. `systemd-networkd` — 4.374 s blame. Cannot be deleted, obviously, but the
+   figure is worth understanding.
+
+**A note on diminishing returns for the goal metric.** `multi-user.target`
+is now at ~18.15 s absolute and carrier at 19.72 s, so the goal sits 1.6 s
+*past* the finish line and that gap is growing as the boot shrinks. So far
+the two have moved together — this change took 0.788 s off the total and
+0.794 s off carrier — but that only holds while wpa_supplicant is waiting on
+the boot rather than on the air. Once the association path dominates,
+further lever-1 work will stop improving time-to-goal, and §7's unexplained
+1.56 s between supplicant init and association becomes the only thing that
+matters.
 
 **Then convert the masks into image changes.** poky's systemd recipe has
 `PACKAGECONFIG` entries for `vconsole` and `logind`, so the product form is
@@ -613,11 +657,15 @@ udev rule fires, the template unit instantiates, and a file appears under
 - The debug drop-in from session 17 was removed at the start of this
   session. The board is clean.
 - No reservation on the router yet. `.34` is held only by a lease.
-- `systemd-analyze`: **19.47 s** mean over six boots (19.296–19.814), with
-  `systemd-vconsole-setup`, `systemd-logind` and
-  `dbus-org.freedesktop.login1` masked **at runtime only** — none of it is in
-  the image yet, and a reflash loses all three.
-- Time-to-goal: carrier at **20.52 s** mean, still inferred rather than
-  measured directly (§1 caveat).
+- `systemd-analyze`: **18.68 s** mean over four boots (18.571–18.830).
+- Time-to-goal: carrier at **19.72 s** mean, spread 36 ms, still inferred
+  rather than measured directly (§1 caveat).
+- **Everything is runtime-only and a reflash loses all of it.** Masked on
+  the board: `systemd-vconsole-setup`, `systemd-logind`,
+  `dbus-org.freedesktop.login1`, `systemd-resolved`. Hand-edited:
+  `/etc/systemd/network/20-wlan0.network` (static, original at
+  `/root/20-wlan0.bak`) and `/etc/resolv.conf` (was an alternatives symlink
+  to `/etc/resolv-conf.systemd` -> `../run/systemd/resolve/resolv.conf`).
+  None of it is in a recipe yet.
 - The journal was vacuumed to one file. The board's boot history before
   2026-08-22 12:56 is gone.
