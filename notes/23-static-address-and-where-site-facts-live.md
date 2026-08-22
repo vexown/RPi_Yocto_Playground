@@ -316,22 +316,167 @@ quietly deleted, same as notes/21 §6.
 
 ---
 
+## 6. Determinism: mostly, and the residual moved
+
+Four boots on the static config:
+
+| boot | printed total | `wlan0: Gained carrier` |
+|---|---|---|
+| first | 21.439 | 21.248 |
+| #1 | 21.430 | 21.166 |
+| #2 | **21.107** | **22.652** |
+| #3 | 21.236 | 21.300 |
+
+Three of the four cluster inside **134 ms**. Boot #2 is 1.4 s late.
+
+The DHCP behaviour is gone: no quantised 4-or-9 second steps, no 30.5 s
+tail. Against the old 24.9–30.5 s, time-to-goal is now 21.2–22.7 s, so
+**3.7 to 9.3 seconds removed**. That result stands.
+
+But "deterministic" was too strong. About 1.4 s of variance survives, and
+it has moved into the association path.
+
+Boot #2 is the one to stare at: **lowest printed total, latest carrier.**
+The two clocks moving in opposite directions inside a single boot — notes/22
+as a data point rather than an argument.
+
+Also worth not rounding away: the printed totals now spread 0.332 s over
+four boots, where the session-17 baseline spread 0.125 s over three. Might
+be sample size, might be real. The ±0.12 figure should stop being quoted
+until it is re-established.
+
+---
+
+## 7. Correction: it was never "3.1 s of scanning"
+
+This document's first draft said *"roughly 3.1 s goes to scanning before it
+picks an AP."* That was a guess dressed as a finding, and the measurement
+says otherwise. Boot #3, all timings from the one boot:
+
+| span | Δ | what |
+|---|---|---|
+| → 18.960 | ~1.0 s | wpa_supplicant **not started yet** |
+| 18.960 → 19.557 | 0.597 | daemon init |
+| 19.557 → 20.540 | 0.983 | init → regdom change |
+| 20.540 → 21.118 | 0.578 | regdom → association attempt |
+| 21.118 → 21.280 | 0.162 | associate + full 4-way handshake |
+
+Only the middle ~1.56 s is even a candidate for scanning. A third of the
+gap is the daemon not running, and 0.6 s is its startup. Three different
+problems wanting three different fixes. (The ~1.0 s is cross-boot — `Link
+UP` came from a different boot — so treat it as approximate.)
+
+### Why it starts at 18.96, and a side effect we caused
+
+```
+wpa_supplicant@wlan0.service @14.540s
+`-basic.target @13.913s
+```
+
+`@` times are offsets from the start of userspace; journal monotonic runs
+from boot. 14.540 + 4.417 = **18.957**, which is the journal's 18.960.
+Same event. Worth pinning down since we now mix the two routinely.
+
+`Requires=sys-subsystem-net-devices-wlan0.device` is satisfied at 14.158,
+so the device is not the gate. The unit is `WantedBy=multi-user.target`
+with default dependencies, hence ordered after `basic.target` — and that
+does not arrive until 18.330 absolute. The supplicant is **blocked, not
+queued**, which was worth checking on a core running at 97%.
+
+And this exposes a side effect of our own work. Session 17's
+`10-wifi-early.conf` pushed `systemd-modules-load.service` from ~0 s to
+2.085 s, and that service is inside `sysinit.target`, which gates
+`basic.target`, which gates the supplicant. The lever-4 change partly works
+against itself.
+
+Still net-positive — without it `wlan0.device` would not exist until 21.5 s
+and `Requires=` would have pinned the supplicant there regardless — but
+reordering is not side-effect-free even when it conserves work.
+
+---
+
+## 8. Where the boot actually ends now
+
+```
+multi-user.target @16.309s
+`-systemd-logind.service @14.384s +1.853s
+  `-basic.target @13.913s
+    `-sockets.target @13.883s
+      `-dropbear.socket @13.853s
+        `-sysinit.target @13.663s
+          `-systemd-vconsole-setup.service @15.973s +777ms
+```
+
+Two things fall out, both lever 1 — deleting work, which on a work-bound
+boot comes straight off the total.
+
+**`systemd-logind`, 1.853 s, and it is the last gate on
+`multi-user.target`.** A headless appliance whose only login path is
+dropbear, which does not use logind.
+
+**`systemd-vconsole-setup`, 777 ms.** Setting up a virtual console font and
+keymap on a board with no monitor, no keyboard, and — since session 17
+dropped the vc4 overlay — no framebuffer at all. For scale, session 17's
+entire shipped gain was 0.616 s.
+
+Caveat on the tree: it is non-monotonic (`systemd-vconsole-setup` @15.973
+sits under `sysinit.target` @13.663), a known `critical-chain` artefact —
+it follows `After=` edges that need not be causal. So "on the critical
+chain" is soft. The `+777ms` itself is solid.
+
+### The blame list, and why it cannot be added up
+
+```
+9.508s dev-mmcblk0p2.device      1.864s systemd-journald.service
+5.281s systemd-resolved.service  1.853s systemd-logind.service
+5.160s systemd-timesyncd.service 1.423s systemd-udevd.service
+4.374s systemd-networkd.service  1.415s systemd-journal-flush.service
+3.864s systemd-udev-trigger.svc  1.279s systemd-remount-fs.service
+2.085s systemd-modules-load.svc  1.278s systemd-userdbd.service
+```
+
+…then a long tail of `sys-kernel-debug.mount`, `dev-mqueue.mount`,
+`modprobe@fuse`, `modprobe@drm`, `tmp.mount` all sitting between 1.13 s and
+1.17 s. Mounting `/tmp` does not take 1.1 s of work. That tight cluster is
+the **signature of a saturated core**: they all started together, all
+finished together, and each one's "duration" is mostly time spent waiting
+for the CPU behind the others.
+
+Which is the reason these figures cannot be summed, and the reason the
+method stays what notes/21 established: delete one thing, measure the
+total, repeat.
+
+---
+
 ## Next
 
-**Confirm determinism.** Two or three more reboots, checking that `Gained
-carrier` and the printed total stay put. The old behaviour was quantised
-and swung by seconds; not swinging is the property we actually bought, and
-one boot does not demonstrate it. *(Not yet done.)*
+**Lever 1, one change at a time, measured separately.** Every candidate
+below is testable with `systemctl mask` and a reboot — **zero rebuild** —
+so the Yocto change only gets written after the number is known:
 
-**Then the next block of wait, and it is a big one.** `wlan0: Link UP` at
-17.953, but wpa_supplicant does not attempt association until 21.079 — and
-once it commits, association plus the full 4-way handshake takes **167 ms**.
-So roughly **3.1 s goes to scanning** before it picks an AP. That is now the
-largest single block on the path to the goal, and no lever has touched it.
-Candidates worth reading up on: a `bssid=`/`freq_list=`/`scan_freq=` pin in
-`wpa_supplicant-wlan0.conf` (which would make it a *provisioning* value,
-same argument as this session), and whether the driver is doing a full
-passive sweep of all channels.
+1. `systemd-vconsole-setup` — 777 ms, no functional risk on a headless board
+2. `systemd-logind` — 1.853 s, last gate on `multi-user.target`; some risk,
+   so verify dropbear still lets you in (recovery is unmasking from the card
+   on the PC)
+3. `systemd-resolved` — 5.281 s blame; with a static address, `/etc/resolv.conf`
+   can simply point at the router
+4. `systemd-timesyncd` — 5.160 s blame; the logger needs correct time, so
+   this is about *when* it runs, not whether
+
+**Then the association path**, which now holds the residual 1.4 s of
+variance. Needs `wpa_supplicant -d` for one boot to see scan events; the
+default log level shows none. If it is a full 2.4 GHz sweep, `scan_freq=`
+in `wpa_supplicant-wlan0.conf` makes it a *provisioning* value under the
+same product-vs-site argument as §2 — with the tradeoff that the router
+runs auto channel selection, so pinning one channel breaks the day it
+moves. Listing 2412/2437/2462 keeps most of the win and most of the
+robustness.
+
+**Also unresolved:** whether the PSK is stored plaintext (PBKDF2-SHA1 ×4096
+at every boot) or as the derived hex key. The first check used
+`grep -c 'psk="'`, which returned 2 — but the real config was copied from
+our example, and the example carries a *comment* line containing `psk="`.
+Pattern was too loose. `grep -cE '^[[:space:]]*psk="'` is the honest test.
 
 **Still open from before:** lever 1 one change at a time — `systemd-resolved`
 and `systemd-timesyncd` (10.3 s of blame between them), the `rauc`
@@ -356,5 +501,6 @@ udev rule fires, the template unit instantiates, and a file appears under
 - The debug drop-in from session 17 was removed at the start of this
   session. The board is clean.
 - No reservation on the router yet. `.34` is held only by a lease.
-- `systemd-analyze`: **21.44 s**, unchanged and expected to stay so.
-  Time-to-goal: **~21.25 s**, inferred not measured.
+- `systemd-analyze`: **21.30 s** mean over four boots (21.107–21.439).
+  Time-to-goal: **21.2–22.7 s**, still inferred from carrier rather than
+  measured directly (§1 caveat).

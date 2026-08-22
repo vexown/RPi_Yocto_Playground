@@ -142,8 +142,13 @@ in ~10-15 s):
       (notes/23). The address is a property of the *site*, not the product,
       so it is applied by `provision-card.sh` as a networkd drop-in and the
       image still ships DHCP: opt in to the fast path, fall back to the safe
-      one. Next: **3.1 s of wpa_supplicant scanning** between `Link UP` and
-      association — now the largest single block on the path to the goal.
+      one. Confirmed over four boots: 21.2–22.7 s, the quantised 4-or-9 s
+      DHCP steps gone, ~1.4 s of residual variance now in the association
+      path. Next targets, both lever 1 and both testable with `systemctl
+      mask` before any rebuild: **`systemd-logind` (1.853 s**, and the last
+      gate on `multi-user.target`, on a board whose only login is dropbear)
+      and **`systemd-vconsole-setup` (777 ms**, a console font for a board
+      with no framebuffer since session 17).
 - [ ] Read-only rootfs so yanking power can't corrupt the SD card
 
 ## Notes
