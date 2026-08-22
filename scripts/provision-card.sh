@@ -72,7 +72,23 @@
 #       headless board that is the right way round, and it is the opposite
 #       of what a static address baked into the image would give you.
 #
-# Neither file's CONTENTS are ever printed by this script. Sizes and
+#   /etc/resolv.conf                                0644 root:root
+#       OPTIONAL, written from STATIC_DNS alongside the address.
+#
+#       Needed because the image is built without systemd-resolved (see
+#       meta-playground/recipes-core/systemd/systemd_%.bbappend). Without
+#       resolved there is no update-alternatives link for /etc/resolv.conf
+#       and nothing publishes a DHCP-learned resolver to a file: networkd
+#       learns it and hands it to resolved over D-Bus, and with no resolved
+#       there is nobody to hand it to. So a resolver has to be provisioned
+#       or the board cannot resolve names at all.
+#
+#       systemd's tmpfiles would otherwise create /etc/resolv.conf at first
+#       boot as a symlink to an empty file. The rule is type `L`, not `L+`,
+#       and plain `L` never touches a path that already exists — which is
+#       what makes writing a real file here work.
+#
+# Neither the PSK's nor the key's CONTENTS are ever printed by this script. Sizes and
 # fingerprints only — the point of the exercise is defeated by a terminal
 # scrollback with a PSK in it.
 set -euo pipefail
@@ -423,6 +439,16 @@ if [ -z "$STATIC_ADDR" ]; then
         sudo rmdir "$DROPIN_DIR" 2>/dev/null || true
     fi
     echo "    $STATIC_MSG"
+    # No static address means no STATIC_DNS either, and this image has no
+    # systemd-resolved to turn a DHCP-learned resolver into a file. The card
+    # will boot, take an address from DHCP and be reachable BY IP, but it
+    # will not resolve names. Say so plainly rather than let it be
+    # discovered on a headless board.
+    echo "    WARNING: no resolver will be configured. The board will get an"
+    echo "             address from DHCP and be reachable by IP, but cannot"
+    echo "             resolve names: this image is built without"
+    echo "             systemd-resolved, so nothing publishes the DHCP"
+    echo "             resolver to /etc/resolv.conf. Set STATIC_DNS to fix."
 else
     sudo install -d -m 0755 -o 0 -g 0 "$DROPIN_DIR"
     # Written with tee because the redirection has to happen as root; a
@@ -451,6 +477,22 @@ else
     sudo chown 0:0 "$DROPIN_DIR/10-static.conf"
     echo "    static: $STATIC_MSG"
     echo "    dns:    ${STATIC_DNS:-(none)}"
+    if [ -z "$STATIC_DNS" ]; then
+        echo
+        echo "    WARNING: no resolver. This image has no systemd-resolved, so"
+        echo "             nothing else will write /etc/resolv.conf and the board"
+        echo "             will not resolve names — including the NTP pool, which"
+        echo "             on this RTC-less board means no correct clock."
+    fi
+    # The resolver. Same argument as the address: a fact about the network
+    # the board is deployed on, not about the product.
+    printf '# Written by scripts/provision-card.sh.\n' \
+        | sudo tee "$MNT/etc/resolv.conf" >/dev/null
+    printf 'nameserver %s\n' "$STATIC_DNS" \
+        | sudo tee -a "$MNT/etc/resolv.conf" >/dev/null
+    sudo chmod 0644 "$MNT/etc/resolv.conf"
+    sudo chown 0:0 "$MNT/etc/resolv.conf"
+    echo "    resolver written to /etc/resolv.conf"
     echo
     echo "    Reminder: this address is claimed by the BOARD, and the LAN has no"
     echo "    authority that arbitrates that claim. Reserve it on the router"
@@ -466,6 +508,7 @@ echo
 echo ">>> Done. Card provisioned:"
 REPORT_PATHS=("$MNT/etc/wpa_supplicant" "$MNT$ROOT_HOME/.ssh")
 [ -n "$STATIC_ADDR" ] && REPORT_PATHS+=("$DROPIN_DIR")
+[ -n "$STATIC_DNS" ]  && REPORT_PATHS+=("$MNT/etc/resolv.conf")
 sudo find "${REPORT_PATHS[@]}" -type f -printf '    %M %u:%g %p\n' \
     | sed "s#$MNT##"
 echo
