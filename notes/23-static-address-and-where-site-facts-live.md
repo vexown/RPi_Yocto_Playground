@@ -448,20 +448,132 @@ total, repeat.
 
 ---
 
+## 9. Lever 1, measured one at a time
+
+Both candidates from §8 were tested with `systemctl mask` and reboots —
+**zero rebuild**, so the number arrives before any Yocto change is written.
+That inverts session 17, where three changes shipped together and had to be
+attributed afterwards by signature.
+
+| configuration | boots | mean total | spread |
+|---|---|---|---|
+| session 17 baseline | 3 | 21.390 | 0.125 |
+| + static address | 4 | 21.303 | 0.332 |
+| + `systemd-vconsole-setup` masked | 3 | 20.816 | 0.145 |
+| + `systemd-logind` masked | 6 | **19.472** | 0.518 |
+
+- **`systemd-vconsole-setup`: −0.487 s.** A console font and keymap for a
+  board with no monitor, no keyboard and — since session 17 dropped the vc4
+  overlay — no framebuffer.
+- **`systemd-logind`: −1.344 s.** The last gate on `multi-user.target`, on a
+  board whose only login path is dropbear, which does not use it.
+
+**Cumulative for the session: 21.390 → 19.472, i.e. −1.918 s (9.0%)**, plus
+the 4–9 s taken off time-to-goal by the static address. Carrier now lands at
+**20.517 s** mean over six boots.
+
+### The blame list as an estimator
+
+Both predictions were made in advance from the blame figure, and both came
+in low:
+
+| unit | blame | actual | ratio |
+|---|---|---|---|
+| `systemd-vconsole-setup` | 0.777 | 0.487 | 63% |
+| `systemd-logind` | 1.853 | 1.344 | 73% |
+
+The gap is contention. A blame number is *wall time inside the unit*, and on
+a core at 97% part of that is the unit sitting in the run queue behind
+others. Deleting the unit deletes its **work**; its share of the queueing
+just redistributes.
+
+So the working rule, now with two data points behind it: **treat blame as an
+upper bound and expect to keep roughly two thirds.** Useful for ranking
+candidates, useless as a promise.
+
+---
+
+## 10. A non-result: the journal pile costs nothing at boot
+
+Recorded so it is not chased again, in the manner of §5.
+
+`/var/log/journal/` had accumulated **30 files, 9.8 MB**, one more per
+reboot. With `systemd-journald.service` at 1.864 s of blame and
+`systemd-journal-flush.service` at 1.415 s, the pile looked like both a
+lever and — worse — a **confound**, since every measurement reboot this
+session had been growing it.
+
+`journalctl --vacuum-files=1` freed 8.5 MB, leaving one file. Six boots
+after:
+
+```
+before vacuum (excluding one outlier):  19.487
+after  vacuum (6 boots):                19.472
+```
+
+**A difference of 15 ms — nothing.** The pile is neither a lever nor a
+confound, and the earlier measurements taken while it grew are fine.
+
+The mechanism, which should have been obvious beforehand: **journald is the
+writer, and a writer does not read archived journals.** Only `journalctl`
+opens them, and only when you query. Archived files cost query time, not
+boot time.
+
+`SystemMaxUse=` and `SystemMaxFiles=` remain worth setting — 9.8 MB of logs
+accumulating unbounded on an SD card is a real problem for a device meant to
+run unattended — but as a **storage** measure. Not a boot-time one.
+
+### Two side findings from the same detour
+
+**`orphan cleanup on readonly fs` appears on every boot of this image, clean
+shutdown or not.** It looked like evidence of unclean shutdown and is not:
+systemd remounts `/` read-only at shutdown but never unmounts it, and ext4
+only processes the orphan list at unmount. A `systemctl start reboot.target`
+— unambiguously clean — produces the same line. This briefly caused the
+logind measurement to be written off as contaminated; it was not.
+
+The evidence that settled it: the only two `.journal~` (unfinalised) files
+in the directory decoded to **2025-05-29 18:48:28**, the stale pre-timesync
+clock of a much older boot. Every file from the measurement session was a
+clean `.journal`. So the reboots where `systemctl reboot` printed *"Call to
+Reboot failed"* had in fact shut down normally — the error was on the D-Bus
+reply path while the shutdown transaction proceeded.
+
+**`journalctl -b -1` does not work on this board.** Not lost data — 20 boots
+were retained. Every boot's journal *begins* in May 2025 and *ends* in
+August 2026, because the Zero W has no RTC and timesyncd corrects the clock
+mid-boot. Relative boot offsets are resolved by realtime ordering, and that
+ordering is scrambled. Name the boot ID explicitly instead:
+`journalctl -b <boot-id>`. This will be true of every RTC-less board.
+
+
+---
+
 ## Next
 
 **Lever 1, one change at a time, measured separately.** Every candidate
 below is testable with `systemctl mask` and a reboot — **zero rebuild** —
 so the Yocto change only gets written after the number is known:
 
-1. `systemd-vconsole-setup` — 777 ms, no functional risk on a headless board
-2. `systemd-logind` — 1.853 s, last gate on `multi-user.target`; some risk,
-   so verify dropbear still lets you in (recovery is unmasking from the card
-   on the PC)
-3. `systemd-resolved` — 5.281 s blame; with a static address, `/etc/resolv.conf`
-   can simply point at the router
-4. `systemd-timesyncd` — 5.160 s blame; the logger needs correct time, so
-   this is about *when* it runs, not whether
+1. ~~`systemd-vconsole-setup`~~ — done, −0.487 s (§9)
+2. ~~`systemd-logind`~~ — done, −1.344 s (§9)
+3. `systemd-resolved` — 5.281 s blame, the largest left. Check what
+   `/etc/resolv.conf` is first: if it points into `/run/systemd/resolve/`,
+   masking resolved breaks DNS until a static `resolv.conf` replaces it.
+4. `systemd-timesyncd` — 5.160 s blame. The logger needs correct time, so
+   this is about *when* it runs, not whether. Note the RTC-less clock jump
+   in §10 — timestamps before timesync are wrong, which matters for a device
+   whose product is timestamped data.
+5. `systemd-udev-trigger` — 3.864 s blame, not yet looked at.
+
+**Then convert the masks into image changes.** poky's systemd recipe has
+`PACKAGECONFIG` entries for `vconsole` and `logind`, so the product form is
+a `systemd_%.bbappend` with `PACKAGECONFIG:remove`, which deletes the
+binaries rather than shipping them and refusing to run them. Masking also
+showed its edge this session: masking `systemd-logind` left the D-Bus alias
+`dbus-org.freedesktop.login1.service` resolving to a masked unit, which
+broke `systemctl reboot` with *"File exists"*. Building without logind
+removes the alias too, so the conflict cannot arise.
 
 **Then the association path**, which now holds the residual 1.4 s of
 variance. Needs `wpa_supplicant -d` for one boot to see scan events; the
@@ -501,6 +613,11 @@ udev rule fires, the template unit instantiates, and a file appears under
 - The debug drop-in from session 17 was removed at the start of this
   session. The board is clean.
 - No reservation on the router yet. `.34` is held only by a lease.
-- `systemd-analyze`: **21.30 s** mean over four boots (21.107–21.439).
-  Time-to-goal: **21.2–22.7 s**, still inferred from carrier rather than
+- `systemd-analyze`: **19.47 s** mean over six boots (19.296–19.814), with
+  `systemd-vconsole-setup`, `systemd-logind` and
+  `dbus-org.freedesktop.login1` masked **at runtime only** — none of it is in
+  the image yet, and a reflash loses all three.
+- Time-to-goal: carrier at **20.52 s** mean, still inferred rather than
   measured directly (§1 caveat).
+- The journal was vacuumed to one file. The board's boot history before
+  2026-08-22 12:56 is gone.

@@ -142,13 +142,18 @@ in ~10-15 s):
       (notes/23). The address is a property of the *site*, not the product,
       so it is applied by `provision-card.sh` as a networkd drop-in and the
       image still ships DHCP: opt in to the fast path, fall back to the safe
-      one. Confirmed over four boots: 21.2–22.7 s, the quantised 4-or-9 s
-      DHCP steps gone, ~1.4 s of residual variance now in the association
-      path. Next targets, both lever 1 and both testable with `systemctl
-      mask` before any rebuild: **`systemd-logind` (1.853 s**, and the last
-      gate on `multi-user.target`, on a board whose only login is dropbear)
-      and **`systemd-vconsole-setup` (777 ms**, a console font for a board
-      with no framebuffer since session 17).
+      one. Session 18 then took two lever-1 units out, measured separately
+      with `systemctl mask` before writing any recipe: **`systemd-logind`
+      −1.344 s** (last gate on `multi-user.target`, on a board whose only
+      login is dropbear) and **`systemd-vconsole-setup` −0.487 s** (a console
+      font for a board with no framebuffer since session 17). **21.390 →
+      19.472 s** mean over six boots, −1.918 s / 9.0%, carrier at 20.52 s.
+      Both predictions were made from the blame list and both came in low,
+      giving a reusable rule: **blame is an upper bound, expect two thirds** —
+      the rest is run-queue contention, not work. Not ticked: the masks are
+      runtime-only and still need folding into a `systemd_%.bbappend` via
+      `PACKAGECONFIG:remove`, and `systemd-resolved` (5.281 s blame) is
+      untouched (notes/23 §9).
 - [ ] Read-only rootfs so yanking power can't corrupt the SD card
 
 ## Notes
