@@ -704,6 +704,65 @@ The same reboot doubles as a **control**: the total should return to
 ~21.30 s. If unmasking does not restore the old number, something else has
 been drifting all session and every measurement needs re-examining.
 
+### Result: falsified, and usefully
+
+Control first: total came back to **21.500 s** against the 21.303 mean
+(range 21.107–21.439) recorded before anything was masked. A single boot,
+sitting 0.06 s above the previous maximum — consistent with the observed
+spread, not identical to it. Nothing has drifted. The sample was taken at
+uptime 23.81 s, i.e. 2.3 s after boot completed, so the CPU figures are
+clean.
+
+| unit | CPU | recovered | recovered / CPU |
+|---|---|---|---|
+| `systemd-vconsole-setup` | 0.212 | 0.487 | **2.30×** |
+| `systemd-logind` | 0.525 | 1.344 | **2.56×** |
+| `systemd-resolved` | 0.609 | 0.788 | **1.29×** |
+
+Predictions were 0.5 / 1.3 / 0.8. Two were out by more than a factor of
+two. **You recover consistently *more* than a unit's own CPU time**, which
+is the opposite direction from the failure mode blame had.
+
+### Why, which is the part worth keeping
+
+A unit's cgroup CPU counter measures the CPU burned *inside that cgroup*.
+Deleting the unit removes more than that:
+
+- the fork/exec, cgroup setup and unit bookkeeping systemd does **on its
+  behalf**, charged to PID 1
+- **D-Bus traffic** it generates, charged to `dbus.service`
+- work its **udev rules** trigger, charged to `systemd-udevd` — relevant to
+  `systemd-vconsole-setup`, which udev invokes per vtconsole device
+- the **SD-card I/O** of paging its binary and shared libraries in, which is
+  iowait and not CPU time at all
+
+`systemd-logind`'s 2.56× is the clearest case: it is the most D-Bus-heavy of
+the three, and none of that traffic appears in its own counter.
+
+### Where this actually leaves the estimator
+
+Neither instrument is an estimator. But they fail differently, and one fails
+better:
+
+| instrument | spread across three units | bias |
+|---|---|---|
+| blame | 15% – 73% (≈5×) | over-promises |
+| CPU time | 1.29× – 2.56× (≈2×) | under-promises |
+
+**CPU time is the better tool**: half the spread, and it errs low, so a
+candidate that looks worth doing on CPU time is worth doing. It is a lower
+bound, not a prediction.
+
+Working rule, third revision, and stated with its uncertainty this time:
+
+> Rank candidates by **CPU time, not blame**. Expect to recover somewhere
+> between **1.3× and 2.6×** it. Anything under ~0.1 s of CPU is not worth a
+> reboot.
+
+That last clause has teeth already: `systemd-journal-flush` is 1.358 s of
+blame — eighth on the list — and 0.090 s of CPU. It would return perhaps
+0.2 s. `systemd-udevd` is ninth on blame and burns 3.109 s of CPU.
+
 ---
 
 ## Next
