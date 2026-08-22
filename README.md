@@ -155,10 +155,19 @@ in ~10-15 s):
       blame) and logind (73%) it looked like *blame is an upper bound worth
       two thirds*, and resolved returned **15%**. Blame cannot distinguish a
       unit that was **busy** from one that was **blocked**, and only the
-      first kind gives its time back — `CPUUsageNSec` is the candidate
-      discriminator, untested. Not ticked: every change is a runtime `mask`
-      or hand-edit and a reflash loses all of it; it still needs folding into
-      a `systemd_%.bbappend` via `PACKAGECONFIG:remove` (notes/23 §9).
+      first kind gives its time back, and `CPUUsageNSec` does not predict it
+      either — it under-promises by 1.3–2.6×, where blame over-promises.
+      Neither is an estimator; CPU time is only useful for *ranking*.
+      Then `systemd-userdbd` −0.795 s, and all four folded into
+      `meta-playground/recipes-core/systemd/systemd_%.bbappend` as
+      `PACKAGECONFIG:remove = "vconsole logind resolved nss-resolve userdb"`,
+      rebuilt and reflashed: **21.390 → 17.677 s, −3.713 s (17.4%)** over six
+      boots, carrier 18.31 s. Removal beat masking by a further 0.212 s
+      because systemd no longer parses the unit files at all. Still not
+      ticked: the remaining time-to-goal variance lives in the
+      **wpa_supplicant association path** — ~1.56 s between daemon init and
+      association attempt, never instrumented, and no lever-1 work will touch
+      it (notes/23 §9, §13).
 - [ ] Read-only rootfs so yanking power can't corrupt the SD card
 
 ## Notes

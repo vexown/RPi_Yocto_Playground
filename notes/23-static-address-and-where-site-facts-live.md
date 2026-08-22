@@ -605,12 +605,17 @@ ordering is scrambled. Name the boot ID explicitly instead:
 
 ---
 
-## 11. CONSOLIDATION CHECKLIST — nothing below is in the image yet
+## 11. CONSOLIDATION — done, and verified on a rebuilt image (§13)
 
-Every gain in §9 is a runtime `systemctl mask` or a hand-edited file on the
-running rootfs. **A reflash erases all of it.** This section is the
-authority on what has to be built; the details were verified against
-`poky/meta/recipes-core/systemd/systemd_255.21.bb` on the build disk.
+> **Status: done.** Written as
+> `meta-playground/recipes-core/systemd/systemd_%.bbappend`, built, flashed
+> and measured — see §13. Kept as written because the reasoning is the
+> record, and because every claim below was checked against
+> `poky/meta/recipes-core/systemd/systemd_255.21.bb` rather than
+> remembered.
+
+Every gain in §9 was a runtime `systemctl mask` or a hand-edited file on the
+running rootfs, and a reflash erases all of it.
 
 ### 1. `meta-playground/recipes-core/systemd/systemd_%.bbappend`
 
@@ -894,3 +899,56 @@ udev rule fires, the template unit instantiates, and a file appears under
   None of it is in a recipe yet.
 - The journal was vacuumed to one file. The board's boot history before
   2026-08-22 12:56 is gone.
+
+---
+
+## 13. The rebuild, and what it confirmed
+
+`PACKAGECONFIG:remove = "vconsole logind resolved nss-resolve userdb"`,
+built, flashed, provisioned.
+
+| configuration | boots | mean | spread |
+|---|---|---|---|
+| four units masked at runtime | 5 | 17.889 | 0.251 |
+| same four removed from the image | 6 | **17.677** | 0.279 |
+
+**Cumulative: 21.390 → 17.677, −3.713 s (17.4%).** Carrier at 18.310 s over
+five boots, spread 0.377.
+
+Four things the rebuild settled, three of them predicted in advance:
+
+**Removal beats masking, by 0.212 s.** Predicted, and for the stated
+reason: masking leaves the unit file on disk for systemd to find, parse and
+load every boot. The first boot came in at 17.492 and looked like a 0.397 s
+win; six boots put it at 0.212. A reminder not to publish the first sample.
+
+**`reboot` works again.** No *"File exists"*. Removing `logind` takes the
+D-Bus alias `dbus-org.freedesktop.login1.service` with it, so the conflict
+that broke `systemctl reboot` all session cannot arise. That breakage was an
+artefact of masking, exactly as §11 predicted — worth recording because it
+is the one place where the cheap measurement technique lied about the
+product.
+
+**`nss-resolve` had to go with `resolved`.** Not for speed. systemd's
+`meson.build` pairs them and calls `error()` if the first is enabled while
+the second is not, so the build would have failed. Read in the unpacked
+source before writing the recipe rather than discovered by a failed build.
+
+**The resolver survived.** `/etc/resolv.conf` on the running board reads
+`# Written by scripts/provision-card.sh.` / `nameserver 192.168.50.1`, and
+`ping example.com` resolves. So the tmpfiles reasoning held: the recipe's
+`L!` rule for `/etc/resolv.conf` is type `L`, not `L+`, and plain `L` does
+not touch a path that already exists.
+
+### Two side observations
+
+`ls /usr/lib/systemd/ | grep -E 'logind|resolved|userdbd|vconsole'` returns
+**`logind.conf.d`** — an empty drop-in directory for a daemon that no longer
+exists, created unconditionally by a package. Cosmetic, inert, not worth a
+patch, but it means that grep is not a clean "is it gone" test.
+
+The reflash produced a new dropbear host key, and because the board now has
+a **static** address that arrived as ssh's `REMOTE HOST IDENTIFICATION HAS
+CHANGED` banner rather than a benign new-host prompt. Same IP, new key. If
+it becomes tiresome across reflashes, provisioning a fixed host key is the
+fix — and it is the same product-vs-site argument as §2 all over again.
