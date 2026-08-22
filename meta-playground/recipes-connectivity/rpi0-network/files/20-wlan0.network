@@ -23,11 +23,43 @@
 Name=wlan0
 
 [Network]
-# The home router hands out the address. A static address is a real
-# option for this product (it removes the DHCP round-trip from the boot
-# critical path, and it means the logger is always at a known address),
-# and it is on the optimize list — but it belongs there, after
-# measurement, not as an untested assumption.
+# The home router hands out the address. This is the IMAGE's default and
+# it stays DHCP deliberately, even though a static address is measurably
+# faster — see below.
+#
+# The measurement, made in session 18 (notes/23). A static address is
+# worth about 4 seconds of time-to-reachable on this board. Not because
+# the router is slow: over five instrumented boots the FIRST DHCP exchange
+# failed every single time, 5 for 5, so networkd sat out RFC 2131's
+# retransmission backoff — 4 +/- 1 s of uniform jitter — before a retry
+# that then completed in ~25 ms. A static address is not a faster version
+# of that conversation, it is the absence of one: claiming an address is a
+# netlink call to the local kernel, so there is no packet to lose and no
+# timer to roll dice against. The saving is deterministic, where DHCP was
+# giving us a quantised 4-or-9 seconds.
+#
+# Correcting the previous version of this comment, which said a static
+# address "removes the DHCP round-trip from the boot critical path": the
+# round-trip was never ON the critical path. Nothing in the boot
+# transaction waits for an address — multi-user.target was reached at
+# 20.6 s with no IP until 24.9-30.5 s. That is exactly why this change
+# does not move the number systemd-analyze prints, and why the two-clock
+# distinction in notes/22 had to be worked out before the measurement
+# meant anything.
+#
+# So why is the default still DHCP, given a measured 4 s?
+#
+# Because an address is a property of the SITE and this file is a property
+# of the PRODUCT. An image with one LAN's address compiled into it only
+# works on that LAN, and a card flashed for the wrong site would boot
+# perfectly and be unreachable — the worst outcome for a headless board.
+# The static address is therefore applied at provisioning time, by
+# scripts/provision-card.sh, as a drop-in at
+# 20-wlan0.network.d/10-static.conf that sets DHCP=no and overrides what
+# is here. See scripts/network.env.example.
+#
+# The direction is the design: opt in to the fast path, fall back to the
+# safe one. Anything unprovisioned lands here, on DHCP, and can be found.
 DHCP=ipv4
 
 # No IPv6 link-local autoconfiguration. This board talks to one thing on

@@ -35,3 +35,12 @@ private/
 wpa_supplicant*.conf
 !*wpa_supplicant*.conf.example
 .rpi0-secrets/
+
+# --- Session 18: per-site network settings ----------------------------------
+# network.env holds the board's static address. Unlike the PSK it is not a
+# secret — an IP is public the moment the board sends a packet — so this is
+# not a leak backstop. It is here because the file describes one SITE, and a
+# site's address committed to a product repo is how somebody else's card ends
+# up claiming an address on your LAN. The .example is tracked deliberately.
+network.env
+!*network.env.example

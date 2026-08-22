@@ -3,6 +3,10 @@
 #
 # Usage:  ./scripts/provision-card.sh /dev/sdX
 #
+#         Optional, for a static address (see network.env.example):
+#           STATIC_ADDR=192.168.50.34/24 STATIC_GW=192.168.50.1 \
+#             ./scripts/provision-card.sh /dev/sdX
+#
 # Run this AFTER ./scripts/flash-sd.sh and BEFORE putting the card in the Pi.
 #
 # ---------------------------------------------------------------------------
@@ -45,6 +49,28 @@
 #       documentation still says so, but this image's /etc/passwd says
 #       /root and /home/root does not exist. Verify, don't remember:
 #           awk -F: '$1=="root"{print $6}' <rootfs>/etc/passwd
+#
+#   /etc/systemd/network/20-wlan0.network.d/10-static.conf   0644 root:root
+#       OPTIONAL — written only when a static address is configured. See
+#       scripts/network.env.example for how to configure one.
+#
+#       A networkd DROP-IN, not a rewrite of 20-wlan0.network. networkd
+#       merges /etc/systemd/network/<name>.network.d/*.conf over the base
+#       file exactly the way systemd merges unit drop-ins, so the recipe's
+#       file stays pristine as the documented product default, what this
+#       script chose is one small file you can cat or diff, and undoing it
+#       is `rm` of that file rather than "restore the backup you hopefully
+#       still have".
+#
+#       The DIRECTION of the default is the point. The IMAGE ships
+#       DHCP=ipv4, which works on any LAN. The static address — worth about
+#       4 seconds of time-to-reachable, measured in session 18, see
+#       notes/23 — is opt-in and applied here. So a card that is never
+#       provisioned, or provisioned for the wrong site, still boots
+#       reachable and can be found. The fast path is the one you ask for;
+#       the safe path is what you get when something goes wrong. For a
+#       headless board that is the right way round, and it is the opposite
+#       of what a static address baked into the image would give you.
 #
 # Neither file's CONTENTS are ever printed by this script. Sizes and
 # fingerprints only — the point of the exercise is defeated by a terminal
@@ -174,6 +200,174 @@ if [ ! -f "${PUBKEY%.pub}" ]; then
     echo "             able to ssh in from THIS machine with this key."
 fi
 
+# --- Optional static address -------------------------------------------------
+# Where the site's network settings live, if it has any. Same directory as
+# the PSK — but NOT for the same reason, and the difference is the whole
+# design decision here.
+#
+# The PSK lives outside the repo because it is a SECRET. An IP address is
+# not; there is nothing wrong with 192.168.50.34 appearing in a public
+# commit. It lives outside anyway because it is a property of the SITE
+# rather than of the product, and baking a site fact into an image you
+# rebuild from a public repo makes a worse artifact — a binary that only
+# works on one LAN.
+#
+# Those two axes — secret/not-secret and site/product — look like one axis
+# as long as the only thing you provision is a PSK, which is both. The
+# address is the case that separates them.
+#
+# $SECRETS_DIR is therefore slightly misnamed once this file lives in it.
+# It is still the right home: it already exists, it is already outside the
+# repo, and it is already the thing that survives a reflash. Inventing a
+# second location for one more site fact is worse than a mildly inaccurate
+# directory name.
+NETWORK_ENV="${NETWORK_ENV:-$SECRETS_DIR/network.env}"
+
+# Environment beats file. The caller's values have to be captured BEFORE
+# sourcing, because sourcing would otherwise overwrite them: the file is
+# the remembered default and the environment is the one-off override, and
+# it would be surprising in the other direction.
+_cli_addr="${STATIC_ADDR:-}"
+_cli_gw="${STATIC_GW:-}"
+_cli_dns="${STATIC_DNS:-}"
+if [ -f "$NETWORK_ENV" ]; then
+    # shellcheck source=/dev/null
+    . "$NETWORK_ENV"
+fi
+STATIC_ADDR="${_cli_addr:-${STATIC_ADDR:-}}"
+STATIC_GW="${_cli_gw:-${STATIC_GW:-}}"
+STATIC_DNS="${_cli_dns:-${STATIC_DNS:-}}"
+
+# Dotted-quad -> 32-bit integer, or non-zero exit. Used for exactly one
+# thing: proving the gateway is on the same wire as the address.
+ip_to_int() {
+    local IFS=. o
+    local a b c d
+    read -r a b c d <<<"$1"
+    for o in "$a" "$b" "$c" "$d"; do
+        case "$o" in
+            ''|*[!0-9]*) return 1 ;;
+        esac
+        # Reject leading zeros rather than accepting them. "010" is not a
+        # harmless spelling of 10: shell arithmetic reads it as octal 8,
+        # and so does ping(1) and much else. An address that silently means
+        # something other than what it looks like is worse than an error.
+        case "$o" in
+            0|[1-9]*) ;;
+            *) return 1 ;;
+        esac
+        [ "$o" -le 255 ] || return 1
+    done
+    echo $(( (a << 24) + (b << 16) + (c << 8) + d ))
+}
+
+if [ -z "$STATIC_ADDR" ]; then
+    # Nothing configured: the image's own 20-wlan0.network stands, and that
+    # says DHCP. This is the fail-safe branch and it is the DEFAULT branch
+    # on purpose — see the header.
+    STATIC_MSG="DHCP — no static address configured, the card keeps the image default"
+else
+    # ---- Validate before touching the card ---------------------------------
+    # Everything below runs before the mount, deliberately. The failure this
+    # feature can cause is a headless board that boots fine and is
+    # unreachable, so a bad value must never make it as far as the card.
+    case "$STATIC_ADDR" in
+        */*) ;;
+        *) echo "ERROR: STATIC_ADDR needs a prefix length: '$STATIC_ADDR'"
+           echo "       e.g. STATIC_ADDR=192.168.50.34/24"
+           exit 1 ;;
+    esac
+    _addr="${STATIC_ADDR%%/*}"
+    _plen="${STATIC_ADDR##*/}"
+
+    case "$_plen" in
+        ''|*[!0-9]*) echo "ERROR: prefix length '$_plen' is not a number."; exit 1 ;;
+    esac
+    if [ "$_plen" -lt 1 ] || [ "$_plen" -gt 32 ]; then
+        echo "ERROR: prefix length /$_plen out of range (1-32). A home LAN is almost always /24."
+        exit 1
+    fi
+
+    _addr_int="$(ip_to_int "$_addr")" || {
+        echo "ERROR: '$_addr' is not a valid IPv4 address."
+        echo "       Four decimal octets 0-255, no leading zeros: 192.168.50.34"
+        exit 1
+    }
+
+    # The netmask as an integer. The & 0xFFFFFFFF matters: bash arithmetic
+    # is 64-bit, so the left shift would otherwise leave high bits set.
+    _mask=$(( (0xFFFFFFFF << (32 - _plen)) & 0xFFFFFFFF ))
+    _net=$(( _addr_int & _mask ))
+    _bcast=$(( _net | (~_mask & 0xFFFFFFFF) ))
+
+    # Network and broadcast addresses are not host addresses. Assigning one
+    # is a typo every time (usually .0 for .1, or .255 for .254), and the
+    # kernel will not stop you.
+    if [ "$_plen" -le 30 ]; then
+        if [ "$_addr_int" -eq "$_net" ]; then
+            echo "ERROR: $_addr is the NETWORK address of /$_plen, not a host address."
+            exit 1
+        fi
+        if [ "$_addr_int" -eq "$_bcast" ]; then
+            echo "ERROR: $_addr is the BROADCAST address of /$_plen, not a host address."
+            exit 1
+        fi
+    fi
+
+    # ---- The gateway, and the check this whole block exists for ------------
+    if [ -z "$STATIC_GW" ]; then
+        echo "ERROR: STATIC_ADDR is set but STATIC_GW is not."
+        echo
+        echo "  A static address with no gateway gives you a board that can"
+        echo "  reach its own LAN and nothing else — no NTP, no updates, and"
+        echo "  no clue as to why. That is a legitimate configuration for an"
+        echo "  isolated sensor, so it is allowed, but it has to be said out"
+        echo "  loud rather than reached by forgetting a line:"
+        echo
+        echo "      STATIC_GW=192.168.50.1     # normal case"
+        echo "      STATIC_GW=none             # deliberately LAN-only"
+        exit 1
+    fi
+
+    if [ "$STATIC_GW" = "none" ]; then
+        STATIC_GW=""
+    else
+        _gw_int="$(ip_to_int "$STATIC_GW")" || {
+            echo "ERROR: STATIC_GW='$STATIC_GW' is not a valid IPv4 address."
+            exit 1
+        }
+        # THE check. A gateway outside the address's prefix is the classic
+        # way to produce an unreachable headless board: the kernel accepts
+        # the address, installs a default route via a next-hop that ARP can
+        # never resolve, and the board boots to silence. Three lines here
+        # delete the entire failure class.
+        if [ "$(( _gw_int & _mask ))" -ne "$_net" ]; then
+            echo "ERROR: gateway $STATIC_GW is not inside $STATIC_ADDR's subnet."
+            echo
+            echo "  The address puts this board on the /$_plen containing $_addr."
+            echo "  A next-hop outside that range can never be reached by ARP, so"
+            echo "  the default route would be installed and then blackhole every"
+            echo "  packet. The board would boot normally and be unreachable."
+            echo
+            echo "  Either fix the gateway, or say STATIC_GW=none if this board is"
+            echo "  genuinely meant to be LAN-only."
+            exit 1
+        fi
+        if [ "$_gw_int" -eq "$_addr_int" ]; then
+            echo "ERROR: gateway $STATIC_GW is the board's own address."
+            exit 1
+        fi
+    fi
+
+    # DNS defaults to the gateway. On a home LAN the router is the resolver
+    # far more often than not, and it is what DHCP was handing us before.
+    if [ -z "$STATIC_DNS" ]; then
+        STATIC_DNS="$STATIC_GW"
+    fi
+
+    STATIC_MSG="$STATIC_ADDR via ${STATIC_GW:-(no gateway — LAN-only)}"
+fi
+
 # --- Mount and install -------------------------------------------------------
 echo ">>> Mounting $ROOTPART ..."
 sudo mount "$ROOTPART" "$MNT"
@@ -216,12 +410,63 @@ sudo install -d -m 0700 -o 0 -g 0 "$MNT$ROOT_HOME/.ssh"
 sudo install -m 0600 -o 0 -g 0 "$PUBKEY" "$MNT$ROOT_HOME/.ssh/authorized_keys"
 echo "    key: $(ssh-keygen -l -f "$PUBKEY" | awk '{print $1, $2, $4}')"
 
+echo ">>> Network addressing ..."
+DROPIN_DIR="$MNT/etc/systemd/network/20-wlan0.network.d"
+if [ -z "$STATIC_ADDR" ]; then
+    # Idempotence: a re-provision that no longer sets a static address must
+    # actually remove the old one. Leaving a stale drop-in behind would give
+    # a card configured for the previous site while this script cheerfully
+    # reported DHCP.
+    if [ -e "$DROPIN_DIR/10-static.conf" ]; then
+        echo "    removing stale static drop-in from a previous provisioning"
+        sudo rm -f "$DROPIN_DIR/10-static.conf"
+        sudo rmdir "$DROPIN_DIR" 2>/dev/null || true
+    fi
+    echo "    $STATIC_MSG"
+else
+    sudo install -d -m 0755 -o 0 -g 0 "$DROPIN_DIR"
+    # Written with tee because the redirection has to happen as root; a
+    # plain `sudo echo ... >` would open the file as the calling user.
+    {
+        echo "# 10-static.conf — written by scripts/provision-card.sh."
+        echo "#"
+        echo "# Site-specific override of the image's DHCP default. Delete this"
+        echo "# file (and reboot) to fall back to DHCP."
+        echo "#"
+        echo "# Why static: the DHCP path costs ~4 s of time-to-reachable on this"
+        echo "# board, and not because the router is slow. The FIRST DHCP exchange"
+        echo "# fails on every single boot (5/5 measured), so networkd sits out"
+        echo "# RFC 2131's 4 +/- 1 s retransmission backoff before a retry that then"
+        echo "# completes in ~25 ms. A static address is not a network conversation"
+        echo "# at all — it is a netlink call — so there is no packet to lose and"
+        echo "# no timer to roll dice against. See notes/22 and notes/23."
+        echo ""
+        echo "[Network]"
+        echo "DHCP=no"
+        echo "Address=$STATIC_ADDR"
+        [ -n "$STATIC_GW" ]  && echo "Gateway=$STATIC_GW"
+        [ -n "$STATIC_DNS" ] && echo "DNS=$STATIC_DNS"
+    } | sudo tee "$DROPIN_DIR/10-static.conf" >/dev/null
+    sudo chmod 0644 "$DROPIN_DIR/10-static.conf"
+    sudo chown 0:0 "$DROPIN_DIR/10-static.conf"
+    echo "    static: $STATIC_MSG"
+    echo "    dns:    ${STATIC_DNS:-(none)}"
+    echo
+    echo "    Reminder: this address is claimed by the BOARD, and the LAN has no"
+    echo "    authority that arbitrates that claim. Reserve it on the router"
+    echo "    (ASUS: LAN -> DHCP Server -> Manually Assigned IP) so the DHCP"
+    echo "    server never hands the same address to something else once the"
+    echo "    board's old lease ages out."
+fi
+
 echo ">>> Syncing ..."
 sync
 
 echo
 echo ">>> Done. Card provisioned:"
-sudo find "$MNT/etc/wpa_supplicant" "$MNT$ROOT_HOME/.ssh" -type f -printf '    %M %u:%g %p\n' \
+REPORT_PATHS=("$MNT/etc/wpa_supplicant" "$MNT$ROOT_HOME/.ssh")
+[ -n "$STATIC_ADDR" ] && REPORT_PATHS+=("$DROPIN_DIR")
+sudo find "${REPORT_PATHS[@]}" -type f -printf '    %M %u:%g %p\n' \
     | sed "s#$MNT##"
 echo
 echo "    Safe to eject and boot. The board should appear on the LAN as"

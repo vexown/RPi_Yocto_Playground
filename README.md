@@ -131,9 +131,19 @@ in ~10-15 s):
       from the critical chain, contributing 0 s to the printed total by
       construction — reordering conserves work (notes/21 §6, corrected).
       Not ticked, and the reason changed: **`systemd-analyze` is not the
-      goal metric.** The board has no IP until **30.5 s** — 9.3 s of DHCP
-      *after* the reported finish line, currently uninvestigated
-      (notes/22 §4).
+      goal metric.** The board had no IP until **24.9–30.5 s** — up to 9.3 s
+      of DHCP *after* the reported finish line (notes/22 §4). Cause found:
+      the **first DHCP exchange fails on every boot** (5/5), so networkd
+      waits out RFC 2131's 4 ± 1 s backoff before a retry that succeeds in
+      ~25 ms. Session 18 fixed it with a **static address**, which is not a
+      faster conversation but the absence of one — a netlink call has no
+      packet to lose. Time-to-goal **~21.25 s**, and the printed total did
+      not move (21.44 s), exactly as the two-clock model predicts
+      (notes/23). The address is a property of the *site*, not the product,
+      so it is applied by `provision-card.sh` as a networkd drop-in and the
+      image still ships DHCP: opt in to the fast path, fall back to the safe
+      one. Next: **3.1 s of wpa_supplicant scanning** between `Link UP` and
+      association — now the largest single block on the path to the goal.
 - [ ] Read-only rootfs so yanking power can't corrupt the SD card
 
 ## Notes
