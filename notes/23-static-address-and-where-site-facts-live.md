@@ -579,6 +579,133 @@ ordering is scrambled. Name the boot ID explicitly instead:
 
 ---
 
+## 11. CONSOLIDATION CHECKLIST — nothing below is in the image yet
+
+Every gain in §9 is a runtime `systemctl mask` or a hand-edited file on the
+running rootfs. **A reflash erases all of it.** This section is the
+authority on what has to be built; the details were verified against
+`poky/meta/recipes-core/systemd/systemd_255.21.bb` on the build disk.
+
+### 1. `meta-playground/recipes-core/systemd/systemd_%.bbappend`
+
+```
+PACKAGECONFIG:remove = "vconsole logind resolved"
+```
+
+Verified in poky's recipe:
+
+- `PACKAGECONFIG[vconsole]` line 229, `[logind]` line 180, `[resolved]`
+  line 208. All three exist and are in the default `PACKAGECONFIG ??=`.
+- **Removing `resolved` also drops the `resolv-conf` alternative.** Line 836:
+  `ALTERNATIVE:${PN} = "halt reboot shutdown poweroff runlevel
+  ${@bb.utils.contains('PACKAGECONFIG', 'resolved', 'resolv-conf', '', d)}"`.
+  So `/etc/resolv.conf` stops being an update-alternatives symlink to
+  `/etc/resolv-conf.systemd`. **Confirm at rebuild what then provides
+  `/etc/resolv.conf`** — if nothing does, provisioning must create it, not
+  merely overwrite it.
+- **The sanity check at lines 820–821 will not fire.** It errors if
+  `DISTRO_FEATURES` contains `systemd-resolved` without
+  `PACKAGECONFIG[nss-resolve, resolved]`. `playground.conf` appends only
+  `rauc`, and the board's `nsswitch.conf` has no `resolve` entry — which is
+  independent confirmation, since base-files only patches that entry in when
+  the feature is set.
+- **Removing `logind` removes the D-Bus alias too**, so the *"File exists"*
+  breakage of `systemctl reboot` seen this session cannot recur. That
+  breakage was an artefact of masking, not of removal.
+
+Candidates not yet measured, same file when they are: `backlight` (no
+screen), `hibernate` (no swap), `machined` + `nss-mymachines` (no
+containers), `localed` (no keyboard), `quotacheck` (`Quota mode: none` in
+dmesg), `nss-resolve` (unreferenced by nsswitch), `userdb`.
+
+### 2. `/etc/resolv.conf`
+
+Currently a hand-written `nameserver 192.168.50.1`. Belongs in
+`provision-card.sh` next to the address — `STATIC_DNS` is already parsed and
+validated there and currently only feeds the networkd drop-in.
+
+### 3. Already written, never exercised
+
+The static-address drop-in path (§2). Needs `~/.rpi0-secrets/network.env` to
+exist before the next provision, or the card comes up on DHCP.
+
+### 4. After the rebuild
+
+Re-measure. The image should land at **~18.68 s** — matching the masked
+board. If it does not, the difference is the point of interest.
+
+### The runtime state being reproduced
+
+Masked: `systemd-vconsole-setup`, `systemd-logind`,
+`dbus-org.freedesktop.login1`, `systemd-resolved`. Hand-edited:
+`/etc/systemd/network/20-wlan0.network` (static; original at
+`/root/20-wlan0.bak`), `/etc/resolv.conf` (was an alternatives symlink to
+`/etc/resolv-conf.systemd` -> `../run/systemd/resolve/resolv.conf`).
+
+---
+
+## 12. A candidate estimator, and how to falsify it
+
+§9 killed *"blame is worth two thirds"*. The replacement hypothesis is
+sharper and therefore easier to kill:
+
+> **The time you recover by deleting a unit is approximately the CPU time
+> that unit consumed — not a fraction of its blame.**
+
+Blame is wall time and includes both queueing and blocking. CPU time is work
+actually done, and on a work-bound boot only work removed is time removed.
+
+`systemctl show -p CPUUsageNSec`, sampled on the current configuration:
+
+| unit | blame | CPU | CPU/blame |
+|---|---|---|---|
+| `systemd-timesyncd` | 4.284 | 0.585 | 14% |
+| `systemd-udev-trigger` | 3.888 | 1.004 | 26% |
+| `systemd-networkd` | 3.669 | 0.587 | 16% |
+| `systemd-journald` | 1.862 | 0.865 | 46% |
+| `systemd-userdbd` | 1.397 | 0.599 | 43% |
+| `systemd-journal-flush` | 1.358 | 0.090 | 6.6% |
+| `systemd-udevd` | 1.210 | **3.109** | **257%** |
+
+Two readings fall straight out.
+
+`systemd-udevd` consumes **more CPU than its blame** — 3.1 s of work against
+1.2 s of "startup". Nothing is wrong: blame stops when the unit reports
+started, and udevd then does the entire coldplug afterwards. It is the
+busiest thing on the board and the blame list never showed it. This is the
+clearest demonstration yet that **blame is the wrong instrument**, and it
+also means `dev-mmcblk0p2.device` at 9.772 s — top of the blame list all
+session — is just udevd's queue depth, exactly as notes/21 said.
+
+`systemd-journal-flush` at 6.6% is almost pure waiting. Predicted return if
+the hypothesis holds: **~0.09 s.** Not worth touching, which is useful — the
+blame list ranked it above `systemd-udevd`.
+
+### The caveat that limits it
+
+`CPUUsageNSec` is cumulative since the unit started, so for a daemon still
+working it includes post-boot CPU. It is clean for one-shots
+(`udev-trigger`, `journal-flush`, `vconsole-setup`) and overstates the boot
+cost of long-lived daemons (`timesyncd` polling NTP, `journald` logging).
+Sample it promptly after boot.
+
+### The falsification test, and it is cheap
+
+Three units have already been deleted and their recovered times measured:
+vconsole-setup **0.487**, logind **1.344**, resolved **0.788**. Their CPU
+times were never captured. Unmask all three, take **one** reboot, read
+`CPUUsageNSec` for each promptly, and re-mask.
+
+If CPU time lands near those three numbers, the hypothesis survives a real
+test against known answers and can be used to rank the remaining
+candidates. If it does not, it dies before a rebuild is spent on it.
+
+The same reboot doubles as a **control**: the total should return to
+~21.30 s. If unmasking does not restore the old number, something else has
+been drifting all session and every measurement needs re-examining.
+
+---
+
 ## Next
 
 **Lever 1, one change at a time, measured separately.** Every candidate
