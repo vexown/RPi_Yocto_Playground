@@ -461,7 +461,8 @@ attributed afterwards by signature.
 | + static address | 4 | 21.303 | 0.332 |
 | + `systemd-vconsole-setup` masked | 3 | 20.816 | 0.145 |
 | + `systemd-logind` masked | 6 | 19.472 | 0.518 |
-| + `systemd-resolved` masked | 4 | **18.684** | 0.259 |
+| + `systemd-resolved` masked | 4 | 18.684 | 0.259 |
+| + `systemd-userdbd` masked | 5 | **17.889** | 0.251 |
 
 - **`systemd-vconsole-setup`: −0.487 s.** A console font and keymap for a
   board with no monitor, no keyboard and — since session 17 dropped the vc4
@@ -476,9 +477,34 @@ attributed afterwards by signature.
   `resolv.conf`; `ping example.com` verified before the timings were
   trusted.
 
-**Cumulative for the session: 21.390 → 18.684, i.e. −2.706 s (12.7%)**, plus
-the 5–11 s taken off time-to-goal by the static address. Carrier now lands at
-**19.723 s** mean over four boots, spread **36 ms**.
+- **`systemd-userdbd`: −0.795 s.** The userdb API, queried by `nss-systemd`
+  for dynamic users. `nsswitch.conf` says `passwd: compat systemd`, so the
+  `systemd` module is present — but every account this board cares about
+  comes from `/etc/passwd` via `compat`. Verified after masking: `id root`
+  and `id -u systemd-network` (998) both resolve. The socket had to be
+  masked alongside the service, or systemd keeps a listener that cannot
+  start. (`getent` is not in this image — it is a glibc utility and busybox
+  has no applet for it. `id` exercises the same `getpwnam` path.)
+
+**Cumulative for the session: 21.390 → 17.889, i.e. −3.501 s (16.4%)**, plus
+the DHCP wait removed from time-to-goal.
+
+### Time-to-goal has caught up with the boot
+
+Carrier over those five boots: 19.023, 17.795, 18.733, 18.990, 17.823 —
+mean **18.473**. Two of them land *before* `systemd-analyze`'s own finish
+line (17.795 against a 18.000 total; 17.823 against 17.826).
+
+That closes the arc this session opened. In notes/22 the goal sat 4.3–9.9 s
+**past** the finish line and the printed number was measuring the wrong
+thing. It now sits roughly *at* it.
+
+The catch is the spread: **1.228 s, and clearly bimodal** — two boots at
+~17.81, three at ~18.92, with nothing in between. A ~1.1 s gap with no
+middle is not noise; it is something happening or not happening. The
+association path is the only candidate, and it is the same ~1.56 s window
+from §7 that has never been instrumented. That is now the single largest
+open item for the goal metric, and no further lever-1 work will touch it.
 
 ### The blame list as an estimator
 
@@ -629,10 +655,22 @@ validated there and currently only feeds the networkd drop-in.
 The static-address drop-in path (§2). Needs `~/.rpi0-secrets/network.env` to
 exist before the next provision, or the card comes up on DHCP.
 
+### A reason the rebuild should beat the masks
+
+Every figure in §9 was measured by **masking**, which leaves the unit file
+on disk. systemd still finds, parses and loads it at every boot — masking
+only makes starting it a no-op. `PACKAGECONFIG:remove` deletes the unit
+files along with the binaries.
+
+So the measured gains are a **lower bound** on what removal gives. Not a
+large margin — parsing a unit file is cheap — but it should be in the right
+direction, and if the rebuilt image comes out *slower* than 17.889 s then
+something is wrong and worth chasing.
+
 ### 4. After the rebuild
 
-Re-measure. The image should land at **~18.68 s** — matching the masked
-board. If it does not, the difference is the point of interest.
+Re-measure. The image should land at **~17.89 s or slightly better** — matching the
+masked board, see above. If it does not, the difference is the point of interest.
 
 ### The runtime state being reproduced
 
@@ -776,6 +814,7 @@ so the Yocto change only gets written after the number is known:
 3. ~~`systemd-resolved`~~ — done, −0.788 s (§9). `/etc/resolv.conf` was a
    two-hop alternatives symlink into `/run/systemd/resolve/`; replaced with
    a static `nameserver 192.168.50.1`.
+3b. ~~`systemd-userdbd`~~ — done, −0.795 s (§9).
 4. `systemd-timesyncd` — 5.160 s blame, but see the estimator problem above:
    this is very likely another *blocked* unit and worth predicting before
    measuring. It also **must not simply be deleted**. The board has no RTC,
