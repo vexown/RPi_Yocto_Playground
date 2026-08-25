@@ -289,3 +289,19 @@ distinguishes that from a board that never joined.
     DISTRO_FEATURES still carrying poky's desktop-ish `x11`.
   - `DISTRO_CODENAME` still says `rpi5-era` on a Zero W image, visible in the
     provisioning script's own output.
+  - **The board accepts a blank root password.** Surfaced when working out
+    what a second laptop would need in order to connect: the answer is
+    nothing at all.
+
+        root::15069:0:99999:7:::                 # empty password field
+        EXTRA_IMAGE_FEATURES ?= "debug-tweaks ..."
+        DROPBEAR_EXTRA_ARGS=" -B"                # -B  Allow blank password logins
+
+    Convenient — no key needs copying onto a work machine, which is the
+    right outcome, since a personal private key does not belong on a managed
+    laptop. But it means anything else on the same network can log in as
+    root. On a personal hotspot with one laptop attached that is nobody; on
+    a site LAN it is everybody. Dropping `debug-tweaks` and relying on the
+    provisioned `authorized_keys` is the change, and it wants doing at the
+    same time as the read-only rootfs — both are "stop shipping a
+    development image" work rather than features.
