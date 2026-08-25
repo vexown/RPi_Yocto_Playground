@@ -38,4 +38,20 @@ mistaken for a working reference:
     produced an infinite crash loop writing an error line to the SD card on
     every lap. `BindsTo=dev-%i.device` replaces it.
 
+Two further details, visible only now the files are here rather than quoted:
+
+  - **Logs went to `/home/blankmcu/logs`**, not `/var/log`. The captures lived
+    in a user's home directory, which is why nothing about the deployment was
+    reproducible — the data and the program were both in the same
+    hand-made place.
+  - **`User=blankmcu`**, so it ran unprivileged and depended on that account
+    being in `dialout`. The Yocto replacement runs as root for want of an
+    unprivileged user on the image, which is a regression the unit's own
+    comments admit to and propose fixing with `useradd.bbclass`.
+
+The error path is worth reading next to `Restart=always`: any exception —
+including the USB adapter being unplugged — appends a line to `error.log` and
+exits 1, whereupon systemd restarts it three seconds later to do the same
+thing again, forever, writing to the SD card each lap.
+
 The replacement is `meta-playground/recipes-apps/serial-logger`.

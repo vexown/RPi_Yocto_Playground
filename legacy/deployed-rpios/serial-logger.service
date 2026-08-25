@@ -1,0 +1,12 @@
+[Unit]
+Description=Bare-bones USB Serial Data Logger
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /home/blankmcu/serial_logger.py
+Restart=always
+RestartSec=3
+User=blankmcu
+
+[Install]
+WantedBy=multi-user.target
