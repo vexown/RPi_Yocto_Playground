@@ -128,6 +128,22 @@ Candidates not yet tested: ASUS "Roaming Assistant" (RSSI-based disconnects),
 airtime fairness, a confused lease table after this board spent a day
 alternating between claiming .34 statically and requesting it by DHCP.
 
+**Corroborating evidence, and it changes the starting hypothesis.** The
+Pico W on the same LAN shows the same behaviour: it intermittently fails to
+join and needs a router reset to recover. Two unrelated devices, different
+silicon, different stacks, same symptom and same remedy — which moves the
+fault off this board entirely and onto the RT-AX3000N. Whatever it is, it is
+not Yocto, not brcmfmac and not anything in this repository.
+
+Worth a look from a third angle too: the serial capture from that Pico W is
+full of `Failed to connect to the TCP server (attempt 708740)`. The retry
+loop itself is by design, but *why* the connections fail may be the same
+router fault seen from inside the target rather than from outside it.
+
+So the next session on this starts at the router, not the board: DHCP server
+logs, Roaming Assistant off, lease table cleared, and ideally a packet capture
+of a DHCP exchange that goes unanswered.
+
 Also worth recording: **power-cycling made the symptom worse.** Every reset
 performed out of frustration restarted the 318-second timer we were waiting
 on. The debugging technique was feeding the fault.
