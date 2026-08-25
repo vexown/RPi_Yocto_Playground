@@ -168,7 +168,41 @@ in ~10-15 s):
       **wpa_supplicant association path** — ~1.56 s between daemon init and
       association attempt, never instrumented, and no lever-1 work will touch
       it (notes/23 §9, §13).
-- [ ] Read-only rootfs so yanking power can't corrupt the SD card
+- [x] **The product actually works, away from home** — 2026-08-25 (notes/24).
+      First run of the serial logger on this board: dwc_otg host mode, a
+      CMSIS-DAP Debugprobe enumerating as `cdc_acm`/`ttyACM0`, the udev rule
+      matching on USB *ancestry* rather than node name, `SYSTEMD_WANTS`
+      instantiating the template, bytes on the card. That last point is the
+      one the rewrite was for — the deployed Python script only knew
+      `/dev/ttyUSB*` and could not see this device at all.
+      Then proven on a **phone hotspot**: one provisioned card, two
+      `network={}` blocks, DHCP address `10.199.167.62/24` from the phone,
+      found by `scripts/find-board.sh` sweeping the laptop's own subnet and
+      matching the board's MAC. Discovery lives on the laptop deliberately —
+      the alternative is avahi + dbus + a rebuild. Across the whole network
+      change the open log file went **797 → 5872 bytes with no gap**: the
+      unit's only dependency is `BindsTo=dev-%i.device`, so losing the
+      network costs the ability to *read* logs live, never to collect them.
+      Two things had been quietly riding on the home LAN and now do not:
+      `/etc/resolv.conf` is written unconditionally from public resolvers,
+      and NTP servers are provisioned **by IP** (timesyncd's compiled-in
+      fallback is `time1-4.google.com`, so the clock depended on DNS).
+      Measured: the clock is true at 27.5 s, of which the NTP round trip is
+      32 ms — the rest is the same RFC 2131 first-exchange failure from
+      session 18, reproduced independently. Also found and fixed: the WiFi
+      PSK was stored **plaintext** on the card, so the Zero W ran PBKDF2 at
+      every boot (`scripts/add-wifi-network.sh`).
+- [ ] Read-only rootfs so yanking power can't corrupt the SD card —
+      **now has a known consequence, measured 2026-08-25** (notes/24 §10).
+      `var-volatile-{lib,cache,spool,srv}.service` are all gated on
+      `ConditionPathIsReadWrite=!/var/lib` and are *skipped* today, so
+      `/var/lib` is on the SD card. Make `/` read-only and they activate:
+      timesyncd's clock file becomes RAM-backed, every boot restores the same
+      compiled-in epoch (`2025-05-29 18:48:29`), and boot-time log files
+      collide on one name and append to each other. The boot already passes
+      through three clocks — that epoch, then the last shutdown at ~15.4 s,
+      then NTP at ~27.5 s — and the logger starts at 18.8 s, a margin of only
+      3.3 s. The fix belongs with this change, not before it.
 
 ## Notes
 
