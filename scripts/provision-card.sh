@@ -7,6 +7,10 @@
 #           STATIC_ADDR=192.168.50.34/24 STATIC_GW=192.168.50.1 \
 #             ./scripts/provision-card.sh /dev/sdX
 #
+#         To force DHCP even though network.env configures a static address
+#         — the right choice for a board that MOVES between networks:
+#           STATIC_ADDR=none ./scripts/provision-card.sh /dev/sdX
+#
 # Run this AFTER ./scripts/flash-sd.sh and BEFORE putting the card in the Pi.
 #
 # ---------------------------------------------------------------------------
@@ -73,7 +77,17 @@
 #       of what a static address baked into the image would give you.
 #
 #   /etc/resolv.conf                                0644 root:root
-#       OPTIONAL, written from STATIC_DNS alongside the address.
+#       ALWAYS written, from $RESOLVERS (default 1.1.1.1 8.8.8.8).
+#
+#       It used to be written only alongside a static address, from
+#       STATIC_DNS, which defaulted to the gateway. That was wrong for a
+#       board that moves: a resolver at 192.168.50.1 is a fact about one
+#       LAN, and on any other network it is an address that answers
+#       nothing. The board resolves names for exactly one purpose — the
+#       NTP pool — so it wants a resolver that is correct EVERYWHERE, and
+#       a public one is that. Same site-versus-product argument as the
+#       address itself, landing on the opposite answer because the
+#       requirement is different.
 #
 #       Needed because the image is built without systemd-resolved (see
 #       meta-playground/recipes-core/systemd/systemd_%.bbappend). Without
@@ -87,6 +101,26 @@
 #       boot as a symlink to an empty file. The rule is type `L`, not `L+`,
 #       and plain `L` never touches a path that already exists — which is
 #       what makes writing a real file here work.
+#
+#   /etc/systemd/timesyncd.conf.d/10-ntp.conf       0644 root:root
+#       ALWAYS written, from $NTP_SERVERS — and they are IP ADDRESSES,
+#       not hostnames, on purpose.
+#
+#       systemd-timesyncd's compiled-in fallback on this image is
+#       "time1.google.com time2.google.com time3.google.com
+#       time4.google.com" (confirmed with strings(1) against the
+#       systemd-timesyncd binary in the rootfs, not from memory), and
+#       /etc/systemd/timesyncd.conf ships with every line commented out.
+#       Hostnames mean the clock depends on DNS working, and DNS on this
+#       image depends on a file we provision. Literal addresses take the
+#       whole resolver out of the path: one fewer thing that has to be
+#       right on a network we have never seen.
+#
+#       This board has no RTC. Without a working time source every boot
+#       starts at whatever /var/lib/systemd/timesync/clock last recorded,
+#       and the serial logger names its files after the clock — which is
+#       how you end up with a day's work in session_ttyACM0_2025-05-29.log
+#       and no way to tell when anything in it happened.
 #
 # Neither the PSK's nor the key's CONTENTS are ever printed by this script. Sizes and
 # fingerprints only — the point of the exercise is defeated by a terminal
@@ -246,6 +280,8 @@ NETWORK_ENV="${NETWORK_ENV:-$SECRETS_DIR/network.env}"
 _cli_addr="${STATIC_ADDR:-}"
 _cli_gw="${STATIC_GW:-}"
 _cli_dns="${STATIC_DNS:-}"
+_cli_resolvers="${RESOLVERS:-}"
+_cli_ntp="${NTP_SERVERS:-}"
 if [ -f "$NETWORK_ENV" ]; then
     # shellcheck source=/dev/null
     . "$NETWORK_ENV"
@@ -253,6 +289,25 @@ fi
 STATIC_ADDR="${_cli_addr:-${STATIC_ADDR:-}}"
 STATIC_GW="${_cli_gw:-${STATIC_GW:-}}"
 STATIC_DNS="${_cli_dns:-${STATIC_DNS:-}}"
+
+# The two settings that must be correct on a network we have never seen.
+# Defaults are deliberately public anycast addresses rather than anything
+# site-derived — see the header for why the resolver is the one place this
+# script does NOT prefer a local answer.
+RESOLVERS="${_cli_resolvers:-${RESOLVERS:-1.1.1.1 8.8.8.8}}"
+NTP_SERVERS="${_cli_ntp:-${NTP_SERVERS:-216.239.35.0 216.239.35.4 162.159.200.1 162.159.200.123}}"
+
+# STATIC_ADDR=none is how you say "DHCP" out loud, and it exists because
+# there was previously no way to say it at all. network.env is sourced
+# above, so once a static address is remembered there, an empty
+# STATIC_ADDR= in the environment cannot override it — the empty string is
+# indistinguishable from "not set" to the ${x:-y} that implements the
+# precedence. A board that moves between networks needs DHCP, and it needs
+# to be one word on the command line, not an edit to a file you then have
+# to remember to undo.
+if [ "$STATIC_ADDR" = "none" ]; then
+    STATIC_ADDR=""
+fi
 
 # Dotted-quad -> 32-bit integer, or non-zero exit. Used for exactly one
 # thing: proving the gateway is on the same wire as the address.
@@ -405,7 +460,10 @@ echo ">>> Installing WiFi configuration ..."
 sudo install -d -m 0700 -o 0 -g 0 "$MNT/etc/wpa_supplicant"
 sudo install -m 0600 -o 0 -g 0 "$WPA_SRC" "$MNT/etc/wpa_supplicant/wpa_supplicant-wlan0.conf"
 # Report without leaking: the SSID line is safe to echo, the psk line is not.
-echo "    ssid: $(sudo grep -oE 'ssid="[^"]*"' "$MNT/etc/wpa_supplicant/wpa_supplicant-wlan0.conf" | head -1 || echo '(none found — check the file!)')"
+# Every ssid, not just the first: the config is expected to carry more than
+# one network={} block now (home plus a phone hotspot), and reporting only
+# the first would hide a hotspot block that failed to get pasted in.
+echo "    ssid(s): $(sudo grep -oE 'ssid="[^"]*"' "$MNT/etc/wpa_supplicant/wpa_supplicant-wlan0.conf" | tr '\n' ' ' || echo '(none found — check the file!)')"
 echo "    psk lines present: $(sudo grep -cE '^[[:space:]]*psk=' "$MNT/etc/wpa_supplicant/wpa_supplicant-wlan0.conf" || true)"
 
 echo ">>> Installing SSH public key ..."
@@ -432,23 +490,14 @@ if [ -z "$STATIC_ADDR" ]; then
     # Idempotence: a re-provision that no longer sets a static address must
     # actually remove the old one. Leaving a stale drop-in behind would give
     # a card configured for the previous site while this script cheerfully
-    # reported DHCP.
+    # reported DHCP — and on a board carried to a different network, that is
+    # precisely a board that boots fine and cannot be reached.
     if [ -e "$DROPIN_DIR/10-static.conf" ]; then
         echo "    removing stale static drop-in from a previous provisioning"
         sudo rm -f "$DROPIN_DIR/10-static.conf"
         sudo rmdir "$DROPIN_DIR" 2>/dev/null || true
     fi
     echo "    $STATIC_MSG"
-    # No static address means no STATIC_DNS either, and this image has no
-    # systemd-resolved to turn a DHCP-learned resolver into a file. The card
-    # will boot, take an address from DHCP and be reachable BY IP, but it
-    # will not resolve names. Say so plainly rather than let it be
-    # discovered on a headless board.
-    echo "    WARNING: no resolver will be configured. The board will get an"
-    echo "             address from DHCP and be reachable by IP, but cannot"
-    echo "             resolve names: this image is built without"
-    echo "             systemd-resolved, so nothing publishes the DHCP"
-    echo "             resolver to /etc/resolv.conf. Set STATIC_DNS to fix."
 else
     sudo install -d -m 0755 -o 0 -g 0 "$DROPIN_DIR"
     # Written with tee because the redirection has to happen as root; a
@@ -466,6 +515,9 @@ else
         echo "# completes in ~25 ms. A static address is not a network conversation"
         echo "# at all — it is a netlink call — so there is no packet to lose and"
         echo "# no timer to roll dice against. See notes/22 and notes/23."
+        echo "#"
+        echo "# The cost is that this card now only works on this LAN. If the board"
+        echo "# is going somewhere else, re-provision with STATIC_ADDR=none."
         echo ""
         echo "[Network]"
         echo "DHCP=no"
@@ -476,23 +528,6 @@ else
     sudo chmod 0644 "$DROPIN_DIR/10-static.conf"
     sudo chown 0:0 "$DROPIN_DIR/10-static.conf"
     echo "    static: $STATIC_MSG"
-    echo "    dns:    ${STATIC_DNS:-(none)}"
-    if [ -z "$STATIC_DNS" ]; then
-        echo
-        echo "    WARNING: no resolver. This image has no systemd-resolved, so"
-        echo "             nothing else will write /etc/resolv.conf and the board"
-        echo "             will not resolve names — including the NTP pool, which"
-        echo "             on this RTC-less board means no correct clock."
-    fi
-    # The resolver. Same argument as the address: a fact about the network
-    # the board is deployed on, not about the product.
-    printf '# Written by scripts/provision-card.sh.\n' \
-        | sudo tee "$MNT/etc/resolv.conf" >/dev/null
-    printf 'nameserver %s\n' "$STATIC_DNS" \
-        | sudo tee -a "$MNT/etc/resolv.conf" >/dev/null
-    sudo chmod 0644 "$MNT/etc/resolv.conf"
-    sudo chown 0:0 "$MNT/etc/resolv.conf"
-    echo "    resolver written to /etc/resolv.conf"
     echo
     echo "    Reminder: this address is claimed by the BOARD, and the LAN has no"
     echo "    authority that arbitrates that claim. Reserve it on the router"
@@ -501,16 +536,70 @@ else
     echo "    board's old lease ages out."
 fi
 
+echo ">>> Resolver ..."
+# Unconditional, and independent of the address above. See the header: the
+# image has no systemd-resolved, so a DHCP-learned resolver is learned by
+# networkd and then handed to nobody. Without this file the board resolves
+# no names at all — which shows up not as a DNS error but as a clock that
+# never gets set, because the only name it ever looks up is an NTP server.
+#
+# Note the DNS= line in the static drop-in above is NOT what does this. That
+# directive is consumed by systemd-resolved, which is not installed. It is
+# written for correctness if resolved ever comes back; it is inert today.
+{
+    printf '# Written by scripts/provision-card.sh.\n'
+    printf '#\n'
+    printf '# Public resolvers on purpose: this board moves between networks and\n'
+    printf '# a router-local resolver is only correct on one of them.\n'
+    for _ns in $RESOLVERS; do
+        printf 'nameserver %s\n' "$_ns"
+    done
+} | sudo tee "$MNT/etc/resolv.conf" >/dev/null
+sudo chmod 0644 "$MNT/etc/resolv.conf"
+sudo chown 0:0 "$MNT/etc/resolv.conf"
+echo "    /etc/resolv.conf: $RESOLVERS"
+
+echo ">>> Time servers ..."
+# Literal addresses, so the clock does not depend on the resolver above
+# working. Belt and braces, and cheap: this board has no RTC, and a logger
+# that timestamps its filenames from a wrong clock produces evidence you
+# cannot correlate with anything.
+TIMESYNC_DIR="$MNT/etc/systemd/timesyncd.conf.d"
+sudo install -d -m 0755 -o 0 -g 0 "$TIMESYNC_DIR"
+{
+    echo "# 10-ntp.conf — written by scripts/provision-card.sh."
+    echo "#"
+    echo "# IP addresses, not hostnames. timesyncd's compiled-in fallback on"
+    echo "# this image is time1-4.google.com, which needs DNS, which needs the"
+    echo "# resolv.conf this script also writes. Naming the servers by address"
+    echo "# removes that dependency: the clock is then one UDP round trip away"
+    echo "# on any network with a route to the internet."
+    echo "#"
+    echo "# Defaults are Google (216.239.35.x) and Cloudflare (162.159.200.x)"
+    echo "# NTP anycast addresses. Override with NTP_SERVERS in network.env."
+    echo ""
+    echo "[Time]"
+    echo "NTP=$NTP_SERVERS"
+} | sudo tee "$TIMESYNC_DIR/10-ntp.conf" >/dev/null
+sudo chmod 0644 "$TIMESYNC_DIR/10-ntp.conf"
+sudo chown 0:0 "$TIMESYNC_DIR/10-ntp.conf"
+echo "    NTP=$NTP_SERVERS"
+
 echo ">>> Syncing ..."
 sync
 
 echo
 echo ">>> Done. Card provisioned:"
-REPORT_PATHS=("$MNT/etc/wpa_supplicant" "$MNT$ROOT_HOME/.ssh")
+REPORT_PATHS=("$MNT/etc/wpa_supplicant" "$MNT$ROOT_HOME/.ssh"
+              "$MNT/etc/resolv.conf" "$TIMESYNC_DIR")
 [ -n "$STATIC_ADDR" ] && REPORT_PATHS+=("$DROPIN_DIR")
-[ -n "$STATIC_DNS" ]  && REPORT_PATHS+=("$MNT/etc/resolv.conf")
 sudo find "${REPORT_PATHS[@]}" -type f -printf '    %M %u:%g %p\n' \
     | sed "s#$MNT##"
 echo
-echo "    Safe to eject and boot. The board should appear on the LAN as"
-echo "    hostname 'raspberrypi0-wifi' once wpa_supplicant associates."
+echo "    Safe to eject and boot."
+if [ -n "$STATIC_ADDR" ]; then
+    echo "    The board will claim ${STATIC_ADDR%%/*} as soon as wlan0 associates."
+else
+    echo "    The board takes its address from DHCP, so it is not known in"
+    echo "    advance. Find it with:  ./scripts/find-board.sh"
+fi

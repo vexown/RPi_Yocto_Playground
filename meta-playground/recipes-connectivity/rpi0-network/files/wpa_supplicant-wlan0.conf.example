@@ -56,9 +56,65 @@ network={
     # Optional: pin the AP by MAC if the SSID is shared by several.
     #bssid=aa:bb:cc:dd:ee:ff
 
-    # Optional: prefer this network if several are configured.
-    #priority=10
+    # See the roaming note below for what priority actually does.
+    priority=10
 }
+
+# --------------------------------------------------------------------------
+# A SECOND NETWORK: TAKING THE BOARD SOMEWHERE ELSE
+# --------------------------------------------------------------------------
+# wpa_supplicant reads as many network={} blocks as you give it and picks one
+# at association time. This is what lets ONE provisioned card work both on
+# the bench and on a phone hotspot at a customer site, with no re-provisioning
+# in between and nothing to switch by hand.
+#
+# HOW IT CHOOSES, precisely, because the mental model matters:
+#
+#   1. It scans, and throws away every configured network it cannot see.
+#      A block for a network that is not on the air costs nothing.
+#   2. Among what remains, HIGHEST priority wins. Equal priorities fall back
+#      to signal strength.
+#
+# So priority is not "which network do I prefer in general", it is only a
+# tiebreaker among networks that are actually present right now. At the
+# office only the hotspot is in range and priority is irrelevant; at home
+# with the phone tethering, priority=10 keeps the board on the real LAN
+# instead of eating someone's mobile data.
+#
+# TESTING THIS WITHOUT GOING ANYWHERE. Bring the hotspot up next to the home
+# router and the rules above will (correctly) keep the board on the home
+# network, so the hotspot path never actually gets exercised. Force it from
+# the board — wpa_cli is in this image at /usr/sbin/wpa_cli:
+#
+#     wpa_cli -i wlan0 list_networks       # ids, in file order, 0-based
+#     wpa_cli -i wlan0 select_network 1    # associate with THIS one only
+#     wpa_cli -i wlan0 status              # confirm ssid= and wpa_state=COMPLETED
+#     wpa_cli -i wlan0 enable_network all  # undo: all networks eligible again
+#
+# select_network disables the others for the lifetime of the daemon, so a
+# reboot restores normal behaviour even if you forget the last line. This
+# tests the config exactly as it will ship, which is the point — the
+# alternative is testing a config with the home block commented out and then
+# shipping a different one.
+#
+# WHAT A PI ZERO W CANNOT DO, so set the phone accordingly:
+#
+#   5 GHz         — the BCM43430 has one 2.4 GHz radio. An Android hotspot
+#                   defaulting to 5 GHz or "auto" is simply invisible to it.
+#   WPA3 / SAE    — this wpa_supplicant does have SAE compiled in (sae_password
+#                   is in the binary), but brcmfmac on this chip is not where
+#                   you want to discover the limits of that. Set the hotspot
+#                   to WPA2-Personal.
+#
+# Also worth knowing: if the board associates but the laptop cannot reach it,
+# suspect client isolation on the hotspot rather than the board. The phone's
+# "connected devices" list settles which of the two it is.
+
+#network={
+#    ssid="MyPhoneHotspot"
+#    psk=0000000000000000000000000000000000000000000000000000000000000000
+#    priority=5
+#}
 
 # For 802.1X / WPA-Enterprise (per-user credentials against a RADIUS
 # server) the block looks completely different — key_mgmt=WPA-EAP, eap=,
