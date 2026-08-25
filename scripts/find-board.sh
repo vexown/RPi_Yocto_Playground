@@ -154,10 +154,38 @@ if [ -z "$FOUND" ]; then
     exit 1
 fi
 
+# HostKeyAlias is the part worth explaining, because the naive command
+# (ssh root@$ip) prompts "authenticity of host can't be established" at
+# every new site, and a prompt you learn to click through protects nothing.
+#
+# ssh files a host key in known_hosts under the NAME YOU TYPED. Type an
+# address and you get an entry bound to that address, so the same board on
+# a different network is, correctly, an unrecognised binding. That rule is
+# not pedantry — without it, any key ever seen could be presented from any
+# address.
+#
+# HostKeyAlias replaces the lookup key with a fixed string, so this board
+# gets ONE known_hosts entry that follows it everywhere. The check is not
+# weakened: a changed key still fails loudly, which is what you actually
+# want to hear about. CheckHostIP=no stops ssh filing a second,
+# address-keyed entry alongside it.
+HOSTKEY_ALIAS="${HOSTKEY_ALIAS:-rpi0-logger}"
+
 for ip in $FOUND; do
-    echo ">>> ssh root@$ip"
+    echo ">>> ssh -o HostKeyAlias=$HOSTKEY_ALIAS -o CheckHostIP=no root@$ip"
 done
 echo
-echo "    If ssh says REMOTE HOST IDENTIFICATION HAS CHANGED, the card was"
-echo "    reflashed and dropbear generated a new host key:"
-echo "      ssh-keygen -R <address>"
+echo "    Tired of the flags? Put this in ~/.ssh/config once:"
+echo
+echo "        Host rpi0"
+echo "            User root"
+echo "            HostKeyAlias $HOSTKEY_ALIAS"
+echo "            CheckHostIP no"
+echo
+echo "    then:  ssh rpi0 -o HostName=<address from above>"
+echo
+echo "    If ssh says REMOTE HOST IDENTIFICATION HAS CHANGED, the board's"
+echo "    host key really did change — which on this image means the card was"
+echo "    reflashed, since dropbear_%.bbappend persists the key across"
+echo "    reboots but not across a reflash:"
+echo "      ssh-keygen -R $HOSTKEY_ALIAS"
