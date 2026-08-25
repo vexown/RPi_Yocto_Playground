@@ -192,6 +192,31 @@ in ~10-15 s):
       session 18, reproduced independently. Also found and fixed: the WiFi
       PSK was stored **plaintext** on the card, so the Zero W ran PBKDF2 at
       every boot (`scripts/add-wifi-network.sh`).
+- [x] **Reachability that survives a hostile network** — 2026-08-25
+      (notes/25). The board became unreachable for **5 m 18 s per boot** on a
+      LAN it had worked on for weeks: carrier at 18 s, DHCP address at 336 s,
+      reproducible to within two seconds across boots seven minutes apart.
+      That interval is RFC 2131's retransmission ladder summed out
+      (2+4+8+16+32+64+64+64+64 = 318 s from carrier), so it is the client
+      retrying its way to success, not the server recovering — which also
+      ruled out the router reboot as either cause or cure. Root cause is
+      **still unknown** and lives in the router's DHCP server; it is
+      intermittent (8 s earlier the same day, 26 s after the fix).
+      Fixed by routing around it: `provision-card.sh` now writes a **hybrid**
+      drop-in — `Address=` *and* `DHCP=ipv4`, with the static gateway at
+      `Metric=2048` so DHCP's 1024 still wins wherever a server exists.
+      Claiming an address is a netlink call, so the board is reachable at
+      carrier whatever DHCP does. **336 s → 17 s**, and clock sync improved
+      27.5 s → 19.3 s as a side effect, because timesyncd was waiting on DHCP
+      too. The original case for a static address was 4 seconds of boot time;
+      the real case is being reachable when the network refuses to cooperate.
+      Getting there cost three wrong diagnoses of mine — power save, the power
+      supply, a dying SD card — all built on one observation that turned out
+      to be an artifact: journald's default `SyncIntervalSec=5m` meant every
+      hard-powered-off boot's journal appeared to stop at 18.7 s. **The
+      instrument shared a failure domain with the fault.** The image already
+      ships a channel that doesn't (`console=serial0,115200`, `serial-getty`
+      enabled) and it has still never been used.
 - [ ] Read-only rootfs so yanking power can't corrupt the SD card —
       **now has a known consequence, measured 2026-08-25** (notes/24 §10).
       `var-volatile-{lib,cache,spool,srv}.service` are all gated on
