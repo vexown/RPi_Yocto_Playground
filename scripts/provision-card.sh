@@ -297,6 +297,27 @@ STATIC_DNS="${_cli_dns:-${STATIC_DNS:-}}"
 RESOLVERS="${_cli_resolvers:-${RESOLVERS:-1.1.1.1 8.8.8.8}}"
 NTP_SERVERS="${_cli_ntp:-${NTP_SERVERS:-216.239.35.0 216.239.35.4 162.159.200.1 162.159.200.123}}"
 
+# Whether a static address KEEPS DHCP running alongside it. Default yes, and
+# that default changed on 2026-08-25 after a night that made the argument for
+# it far better than the original reasoning did.
+#
+# The old behaviour was DHCP=no — pure static, on the grounds that it is the
+# honest configuration for a device living on one known LAN. The hybrid gets
+# the same speed, because an address is claimed by a netlink call the moment
+# the link has carrier either way, and adds a fallback for every network
+# where the static address is meaningless. The only cost is a DHCP client
+# running in the background that nothing waits for.
+#
+# What made it the default: with DHCP alone, this board became unreachable
+# for 5m18s per boot on a LAN it had worked on for weeks — carrier at 18 s,
+# address at 336 s, reproducible to within two seconds across boots. The
+# cause is still unknown and is somewhere in the DHCP server. A configuration
+# that is merely FAST when the network cooperates is worth much less than one
+# that is reachable when it does not, and the hybrid is both.
+#
+# STATIC_DHCP_FALLBACK=no restores the pure-static form.
+STATIC_DHCP_FALLBACK="${STATIC_DHCP_FALLBACK:-yes}"
+
 # STATIC_ADDR=none is how you say "DHCP" out loud, and it exists because
 # there was previously no way to say it at all. network.env is sourced
 # above, so once a static address is remembered there, an empty
@@ -506,28 +527,66 @@ else
         echo "# 10-static.conf — written by scripts/provision-card.sh."
         echo "#"
         echo "# Site-specific override of the image's DHCP default. Delete this"
-        echo "# file (and reboot) to fall back to DHCP."
+        echo "# file (and reboot) to fall back to plain DHCP."
         echo "#"
-        echo "# Why static: the DHCP path costs ~4 s of time-to-reachable on this"
-        echo "# board, and not because the router is slow. The FIRST DHCP exchange"
-        echo "# fails on every single boot (5/5 measured), so networkd sits out"
-        echo "# RFC 2131's 4 +/- 1 s retransmission backoff before a retry that then"
-        echo "# completes in ~25 ms. A static address is not a network conversation"
-        echo "# at all — it is a netlink call — so there is no packet to lose and"
-        echo "# no timer to roll dice against. See notes/22 and notes/23."
+        echo "# Why claim an address rather than ask for one: asking is a network"
+        echo "# conversation and claiming is a netlink call to the local kernel."
+        echo "# There is no packet to lose and no timer to roll dice against, so"
+        echo "# the address exists the moment the link has carrier."
         echo "#"
-        echo "# The cost is that this card now only works on this LAN. If the board"
-        echo "# is going somewhere else, re-provision with STATIC_ADDR=none."
-        echo ""
-        echo "[Network]"
-        echo "DHCP=no"
-        echo "Address=$STATIC_ADDR"
-        [ -n "$STATIC_GW" ]  && echo "Gateway=$STATIC_GW"
-        [ -n "$STATIC_DNS" ] && echo "DNS=$STATIC_DNS"
+        echo "# That is worth ~4 s on a good day (notes/23: the first DHCP exchange"
+        echo "# failed on 5 boots out of 5, costing RFC 2131's 4 +/- 1 s backoff)."
+        echo "# On a bad day it is worth far more — measured 2026-08-25, this LAN"
+        echo "# left the board with carrier at 18 s and no address until 336 s,"
+        echo "# reproducibly, for reasons still not understood (notes/25)."
+        if [ "$STATIC_DHCP_FALLBACK" = "no" ]; then
+            echo "#"
+            echo "# STATIC_DHCP_FALLBACK=no: pure static, no DHCP client at all."
+            echo "# This card now works ONLY on this LAN. Re-provision with"
+            echo "# STATIC_ADDR=none before taking the board anywhere else."
+            echo ""
+            echo "[Network]"
+            echo "DHCP=no"
+            echo "Address=$STATIC_ADDR"
+            [ -n "$STATIC_GW" ]  && echo "Gateway=$STATIC_GW"
+            [ -n "$STATIC_DNS" ] && echo "DNS=$STATIC_DNS"
+        else
+            echo "#"
+            echo "# DHCP runs ALONGSIDE the static address. On this LAN the static"
+            echo "# address makes the board reachable immediately and the DHCP lease"
+            echo "# is a bonus nothing waits for; on any other network the static"
+            echo "# address is inert and DHCP is what gets the board an address."
+            echo "# One card, both sites, no re-provisioning in between."
+            echo "#"
+            echo "# Metric=2048 is the load-bearing line, and it is backwards from"
+            echo "# what you would naturally write. networkd gives DHCP-learned"
+            echo "# default routes metric 1024, and LOWER wins. At its default"
+            echo "# metric the static route would be preferred EVERYWHERE —"
+            echo "# including on a network where this gateway does not exist, where"
+            echo "# it would be installed, preferred, and then blackhole every"
+            echo "# packet leaving the LAN. Pushing it to 2048 lets DHCP win"
+            echo "# wherever a DHCP server exists, and leaves this gateway as the"
+            echo "# fallback for when none does."
+            echo ""
+            echo "[Network]"
+            echo "Address=$STATIC_ADDR"
+            echo "DHCP=ipv4"
+            [ -n "$STATIC_DNS" ] && echo "DNS=$STATIC_DNS"
+            if [ -n "$STATIC_GW" ]; then
+                echo ""
+                echo "[Route]"
+                echo "Gateway=$STATIC_GW"
+                echo "Metric=2048"
+            fi
+        fi
     } | sudo tee "$DROPIN_DIR/10-static.conf" >/dev/null
     sudo chmod 0644 "$DROPIN_DIR/10-static.conf"
     sudo chown 0:0 "$DROPIN_DIR/10-static.conf"
-    echo "    static: $STATIC_MSG"
+    if [ "$STATIC_DHCP_FALLBACK" = "no" ]; then
+        echo "    static: $STATIC_MSG  (pure static — DHCP disabled)"
+    else
+        echo "    static: $STATIC_MSG  (+ DHCP alongside, route metric 2048)"
+    fi
     echo
     echo "    Reminder: this address is claimed by the BOARD, and the LAN has no"
     echo "    authority that arbitrates that claim. Reserve it on the router"
