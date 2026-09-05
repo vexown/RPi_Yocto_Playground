@@ -217,6 +217,52 @@ in ~10-15 s):
       instrument shared a failure domain with the fault.** The image already
       ships a channel that doesn't (`console=serial0,115200`, `serial-getty`
       enabled) and it has still never been used.
+- [x] **The first day in the field, and the two faults it found** —
+      2026-09-05 (notes/26). Total failure at work: the finder hung and no
+      log was written. Both real, both below the layer session 24 proved.
+      **The bench proof was a proof about the wrong device.** `cdc-acm` is
+      the one *complete* driver in this image — it registers a tty by
+      itself — while every other is a bridge driver delegating to
+      `usbserial`. So a green light from a Debugprobe was never evidence
+      about the work adapter, which turned out to be a **PL2303**
+      (`067b:2303`) whose driver we had simply never shipped: the device
+      enumerates cleanly and the chain stops, no tty, nothing for the udev
+      rule to match, silent at every layer that has diagnostics. Fixed and
+      verified — a full boot of the target captured end to end. A first
+      guess blaming `usbserial` was wrong and is kept in the recipe:
+      `modprobe ftdi_sio` pulled it in unaided, so `kernel-module-split`
+      *does* generate link-time module deps, and the `brcmfmac-wcc` lesson
+      is only about runtime `request_module()`.
+      Second fault: hot-plugging the harness **resets the board**. Not the
+      adapter's inrush (alone it is fine), not the target's draw (it resets
+      with the target switched off), and not a Zero W limitation — the old
+      Pi OS deployment ran this same rig while burning 100% of the core on a
+      spin loop, so it had *less* headroom. It is the insertion transient
+      only, and the proof was already in the failure: the board's own reset
+      cycle **is** the connect-then-power test, and it passes. On a PC the
+      USB port is a load on a supply; on a Zero W the OTG VBUS *is* the node
+      that feeds the SoC's regulator. Closed with a procedure — connect
+      before power — which is likely why Pi OS never met it.
+      Also fixed: `find-board.sh` swept every route the host had, including
+      a VPN tunnel whose 65534 addresses are not on the local wire and so
+      cost a full timeout each. Now skips tunnels and bridges, clamps
+      anything wider than `/22`, times each sweep, and caches the last hit.
+      **Untested on a hotspot.**
+- [ ] **Operating the logger** — designed 2026-09-05, all three in
+      notes/26 "For session 27". (a) The session filename is stamped with
+      systemd's compiled-in epoch, because the logger starts at ~18.8 s and
+      NTP lands later, so every boot-attached device produces a file dated
+      May 2025. Fix with `TFD_TIMER_CANCEL_ON_SET`: a `timerfd` on
+      `CLOCK_REALTIME` goes `ECANCELED` when the clock is *stepped*, so the
+      logger recomputes `realtime_now − monotonic_elapsed` and renames its
+      own file — no ordering dependency, the unit still starts the moment
+      udev fires. Ordering after `time-sync.target` is the obvious fix and
+      the wrong one: it puts the network back in front of a USB reader.
+      (b) `SIGHUP` rotation, because the adapter cannot be unplugged
+      without resetting the board, so every capture accumulates into one
+      file forever. (c) An ASCII-menu operator tool on the target — an OS
+      built to log serial devices currently ships no way to *operate* the
+      logging.
 - [ ] Read-only rootfs so yanking power can't corrupt the SD card —
       **now has a known consequence, measured 2026-08-25** (notes/24 §10).
       `var-volatile-{lib,cache,spool,srv}.service` are all gated on
