@@ -59,20 +59,70 @@ IMAGE_INSTALL = "\
 # Named one by one, on purpose. The alternative is the "kernel-modules"
 # meta-package, which is what the rauc bbappend was dragging in: 1732
 # packages, tens of megabytes, and a depmod pass over all of it at every
-# boot. Four named modules is ~100 KB and says out loud which hardware this
-# product supports.
+# boot. A handful of named modules is ~150 KB and says out loud which
+# hardware this product supports.
 #
-#   cdc-acm   USB CDC-ACM. What the Raspberry Pi Debugprobe on the bench
-#             enumerates as (2e8a:000c -> /dev/ttyACM0). Also most Arduino-
-#             class boards and anything speaking the USB serial class
-#             natively rather than through a bridge chip.
-#   ftdi-sio  FTDI FT232/FT2232 etc. The classic blue USB-serial dongles.
-#   cp210x    Silicon Labs CP2102/CP2104. Common on ESP32 dev boards.
-#   ch341     WCH CH340/CH341. Ubiquitous on cheap clone boards.
+#   cdc-acm    USB CDC-ACM. What the Raspberry Pi Debugprobe on the bench
+#              enumerates as (2e8a:000c -> /dev/ttyACM0). Also most Arduino-
+#              class boards and anything speaking the USB serial class
+#              natively rather than through a bridge chip.
+#   usbserial  The USB-serial CORE. Not a driver for any chip; it is the
+#              framework the bridge drivers below are built on.
+#   ftdi-sio   FTDI FT232/FT2232 etc. The classic blue USB-serial dongles.
+#   cp210x     Silicon Labs CP2102/CP2104. Common on ESP32 dev boards.
+#   ch341      WCH CH340/CH341. Ubiquitous on cheap clone boards.
+#   pl2303     Prolific PL2303. See below — this is the one that was missing,
+#              and it is the one the actual work adapter needs.
 #
-# Together those four cover essentially every USB-serial adapter you can
-# buy. Adding a fifth later is one line here plus a reflash — cheaper than
-# shipping all 1732 forever on the chance that one day you need one.
+# ---------------------------------------------------------------------------
+# WHY pl2303 IS HERE  (session 26)
+# ---------------------------------------------------------------------------
+# The first time this image met the real work adapter, no /dev/ttyUSB0
+# appeared and nothing was logged. The adapter turned out to be:
+#
+#     Bus 001 Device 004: ID 067b:2303 Prolific Technology, Inc. PL2303
+#
+# and the card carried exactly four modules under drivers/usb/serial:
+#
+#     ch341.ko.xz  cp210x.ko.xz  ftdi_sio.ko.xz  usbserial.ko.xz
+#
+# No pl2303. So there was no driver to bind, no tty to create, and nothing
+# for the udev rule to match — a silent failure at the very bottom of the
+# stack, below every layer that has any diagnostics in it.
+#
+# This was a plain omission, not a subtlety. The comment that used to sit
+# here claimed these drivers "cover essentially every USB-serial adapter you
+# can buy" while leaving out one of the two most common cheap bridges on the
+# market. Prolific and WCH split that market between them; shipping ch341
+# without pl2303 covers half of it and reads as if it covers all of it.
+#
+# ---------------------------------------------------------------------------
+# A WRONG GUESS WORTH KEEPING, BECAUSE IT LOOKED SO GOOD
+# ---------------------------------------------------------------------------
+# Before the adapter was identified, the failure was blamed on usbserial.
+# The argument: cdc-acm is a COMPLETE driver that registers a tty by itself,
+# while every bridge driver is only half a thing and delegates the tty
+# machinery to usbserial.ko. So the bench test (a Debugprobe, cdc-acm) had
+# exercised the one path in this image that does not need usbserial, and
+# proved nothing about the other three. Elegant, matched every symptom, and
+# had a precedent right below in the brcmfmac-wcc note.
+#
+# It was wrong. On the board:
+#
+#     # modprobe ftdi_sio
+#     # lsmod
+#     ftdi_sio               45056  0
+#     usbserial              36864  1 ftdi_sio
+#
+# usbserial came in on its own, because kernel-module-split DID generate the
+# dependency from modinfo — the thing the brcmutil note below says it
+# "should" do. It does. The lesson from brcmfmac-wcc is narrower than it
+# looked: what split cannot see is a RUNTIME request_module(), not an
+# ordinary link-time module dependency.
+#
+# usbserial stays named anyway, for the same one-line reason brcmutil is
+# named. It is documentation, not a fix, and it should not be mistaken for
+# one.
 #
 # On the package names: the real packages are versioned
 # (kernel-module-cdc-acm-6.6.63), and each one RPROVIDES the unversioned
@@ -83,13 +133,17 @@ IMAGE_INSTALL = "\
 #
 # The udev rule in serial-logger matches by ANCESTRY
 # (SUBSYSTEM=="tty", SUBSYSTEMS=="usb"), not by driver name, so it already
-# handles a driver we haven't installed yet without being edited. The
-# module list and the udev rule are deliberately decoupled that way.
+# handles a driver we haven't installed yet without being edited. The module
+# list and the udev rule are deliberately decoupled that way — which is also
+# why the pl2303 failure was silent at the udev layer: there was no tty to
+# match, so there was nothing for the rule to be wrong about.
 LOGGER_USB_SERIAL_MODULES = "\
     kernel-module-cdc-acm \
+    kernel-module-usbserial \
     kernel-module-ftdi-sio \
     kernel-module-cp210x \
     kernel-module-ch341 \
+    kernel-module-pl2303 \
     "
 
 # --- WiFi -------------------------------------------------------------------
