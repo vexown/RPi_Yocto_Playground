@@ -248,21 +248,51 @@ in ~10-15 s):
       cost a full timeout each. Now skips tunnels and bridges, clamps
       anything wider than `/22`, times each sweep, and caches the last hit.
       **Untested on a hotspot.**
-- [ ] **Operating the logger** — designed 2026-09-05, all three in
-      notes/26 "For session 27". (a) The session filename is stamped with
-      systemd's compiled-in epoch, because the logger starts at ~18.8 s and
-      NTP lands later, so every boot-attached device produces a file dated
-      May 2025. Fix with `TFD_TIMER_CANCEL_ON_SET`: a `timerfd` on
-      `CLOCK_REALTIME` goes `ECANCELED` when the clock is *stepped*, so the
-      logger recomputes `realtime_now − monotonic_elapsed` and renames its
-      own file — no ordering dependency, the unit still starts the moment
-      udev fires. Ordering after `time-sync.target` is the obvious fix and
-      the wrong one: it puts the network back in front of a USB reader.
-      (b) `SIGHUP` rotation, because the adapter cannot be unplugged
-      without resetting the board, so every capture accumulates into one
-      file forever. (c) An ASCII-menu operator tool on the target — an OS
-      built to log serial devices currently ships no way to *operate* the
-      logging.
+- [x] **(a) The filename corrects itself** — 2026-10-03 (notes/27),
+      VERIFIED on hardware. A `timerfd` on `CLOCK_REALTIME` created
+      `TFD_TIMER_CANCEL_ON_SET` joins the `poll()` loop the program already
+      had; the timer is never meant to fire, we want the kernel
+      *cancelling* it when the clock is **stepped**, which arrives as
+      `read()` returning `ECANCELED`. The logger then computes
+      `realtime_now − monotonic_elapsed` and `rename()`s its own file — an
+      open fd refers to the file, not the name, so no reopen and no lost
+      bytes. No ordering dependency: `After=time-sync.target` is the
+      obvious fix and the wrong one, putting the network in front of a USB
+      reader. Measured in one boot: wrong name at 19.50 s, corrected at
+      21.19 s, accurate to the second.
+      **The race is nondeterministic, which is why this matters.** Same
+      card, two boots four minutes apart: NTP landed at 18.19 s on one and
+      20.34 s on the other against a logger that starts at ~18.9 s. The
+      name was not reliably wrong, it was *sometimes right*. Both bad forms
+      were found on the card — the image build date (first boot after a
+      reflash) and the last-run time (every boot after) — so the error
+      equals however long the board was off.
+- [x] **(b) `SIGHUP` rotation and a disk budget** — 2026-10-03 (notes/27),
+      tested on the host, NOT yet on hardware. The adapter cannot be
+      unplugged without resetting the board, so captures accumulated into
+      one file forever. Measured: ~77 bytes/sec, ~6.7 MB/day against
+      29.5 MB free — **four days to a full rootfs**, which on an
+      unattended logger is a board with no room to let you ssh in and fix
+      it. `SIGHUP` rotates (safe to repurpose *only* because the port is
+      opened `O_NOCTTY`, so a carrier drop cannot be mistaken for an
+      operator), a size cap rotates through the same path, and a total
+      budget prunes oldest-first scoped per device. Both limits live in
+      `/etc/default/serial-logger`; 0 disables. Enforced at rotation
+      boundaries, so usage reaches `budget + max_file_bytes` — bounded, not
+      a hard ceiling. A bigger partition is not a fix: any fixed space
+      loses to unbounded growth, it only moves the date.
+- [ ] **(c) An ASCII-menu operator tool** on the target — an OS built to
+      log serial devices still ships no way to *operate* the logging. Now
+      has real primitives to wrap rather than being invented alongside
+      them.
+- [ ] **A separate partition for captures.** Not a substitute for (b): the
+      caps stop the logger misbehaving, a partition contains the damage
+      when something else does. A full dedicated partition stops logging; a
+      full rootfs stops the board. Note the 100 MB rootfs is
+      `IMAGE_OVERHEAD_FACTOR` (1.3) over content with
+      `IMAGE_ROOTFS_EXTRA_SPACE` unset — the rest of the card is
+      unallocated, since Yocto does not expand on first boot the way Pi OS
+      does.
 - [ ] Read-only rootfs so yanking power can't corrupt the SD card —
       **now has a known consequence, measured 2026-08-25** (notes/24 §10).
       `var-volatile-{lib,cache,spool,srv}.service` are all gated on
