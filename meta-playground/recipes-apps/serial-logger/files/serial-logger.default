@@ -22,6 +22,37 @@
 # ReadWritePaths= adding instead.
 #LOGGER_DIR=/var/log/serial-logger
 
+# --- Self-imposed disk limits (session 27) --------------------------------
+#
+# WHY THESE EXIST: the adapter cannot be unplugged without resetting this
+# board, so without rotation a capture grows forever. Measured on hardware:
+# ~77 bytes/sec, about 6.7 MB/day, against 29.5 MB free on a 100 MB rootfs.
+# That is roughly four days to a full disk, and a full rootfs on an
+# unattended logger is a board you may not be able to ssh into to fix.
+#
+# A bigger partition does not fix this -- any fixed amount of space loses to
+# unbounded growth, it only moves the date. Bounding the growth works at any
+# size.
+#
+# Bytes. 0 disables the limit entirely.
+
+# Rotate to a new file once the current one reaches this size.
+#LOGGER_MAX_FILE_BYTES=4194304
+
+# Delete the OLDEST captures for this device until the total is back under
+# this. Scoped per device, so two adapters logging at once never delete each
+# other's work. Every deletion is reported to the journal.
+#
+# Note this is enforced at rotation boundaries, so real usage can reach
+# LOGGER_MAX_TOTAL_BYTES + LOGGER_MAX_FILE_BYTES before it is trimmed.
+#LOGGER_MAX_TOTAL_BYTES=16777216
+
+# To start a new file by hand at an interesting moment:
+#     systemctl kill -s HUP serial-logger@ttyUSB0
+# SIGHUP is the idiom logrotate uses. It is safe to repurpose here only
+# because the port is opened O_NOCTTY, so a hangup on the wire can never be
+# mistaken for an operator asking for a new file.
+
 # NOTE: this applies to every instance. Per-device settings (one adapter at
 # 9600, another at 115200) would be a drop-in on the specific instance:
 #   /etc/systemd/system/serial-logger@ttyUSB0.service.d/baud.conf

@@ -39,18 +39,68 @@
  *    twice. Status and errors still go to stderr (and thus the journal),
  *    which is what you actually want to see in `journalctl`. To watch data
  *    live, tail the log file.
+ *
+ * ADDED IN SESSION 27
+ *
+ * 5. The file name CORRECTS ITSELF when the clock does. A Pi has no
+ *    battery-backed RTC, and this unit starts the instant udev sees the
+ *    adapter -- measured at 18.85 s on this board, against NTP landing at
+ *    18.19 s on one boot and 20.34 s on the next. So whether the name is
+ *    right depends on how fast wifi associated that morning, which is worse
+ *    than being reliably wrong. Two bad names were observed on the card:
+ *    the image's build date (first boot after a reflash, before
+ *    /var/lib/systemd/timesync/clock exists) and the last-run time (every
+ *    boot after). The error equals however long the board was off.
+ *
+ *    The fix is a timerfd on CLOCK_REALTIME created with
+ *    TFD_TIMER_CANCEL_ON_SET. We are not interested in the timer firing --
+ *    we are interested in the kernel CANCELLING it, which it does when
+ *    something STEPS the wall clock. That surfaces as read() returning
+ *    ECANCELED. At that point we know the real time and, from
+ *    CLOCK_MONOTONIC, how long we have been running, so the true start time
+ *    is a subtraction. Then rename() the file.
+ *
+ *    Why not just order the unit After=time-sync.target: because that puts
+ *    the network in front of a USB reader. The device is here NOW; waiting
+ *    for DHCP and NTP before logging it is the wrong trade for a tool whose
+ *    entire job is catching early boot output. This approach adds no
+ *    ordering dependency at all -- the unit still starts the microsecond
+ *    udev fires, and the correction arrives a second or two later on its
+ *    own. A slewed clock does not trigger it, which is correct: slewing
+ *    never moves the clock far enough to matter for a file name.
+ *
+ * 6. The logger BOUNDS ITS OWN DISK USAGE, and rotates on SIGHUP. The
+ *    adapter cannot be unplugged without resetting this board, so without
+ *    rotation every capture accumulates into one file forever. Measured on
+ *    hardware: ~77 bytes/sec, about 6.7 MB/day, against 29.5 MB free on a
+ *    100 MB rootfs -- roughly four days to fill the disk. A full rootfs on
+ *    an unattended logger is not degradation, it is a dead board you may
+ *    not be able to ssh into to fix.
+ *
+ *    So: SIGHUP closes the current file and opens a fresh one (the idiom
+ *    logrotate uses), a size cap rotates automatically, and a total budget
+ *    deletes the oldest captures for THIS device. Note the existing
+ *    O_NOCTTY on the serial port is what makes SIGHUP safe to repurpose --
+ *    it is precisely why a hangup on the wire cannot deliver us one.
+ *
+ *    A bigger partition is NOT a fix for this. Any fixed amount of space
+ *    loses to unbounded growth; it only changes the date. Bounding the
+ *    growth works at any partition size.
  */
 
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>     /* PATH_MAX */
 #include <poll.h>
 #include <signal.h>
+#include <stdint.h>     /* uint64_t, for the timerfd read */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/timerfd.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
@@ -66,16 +116,42 @@
 
 #define READ_CHUNK     1024
 
+/* Self-imposed limits, both overridable from /etc/default/serial-logger.
+ * Zero disables either one.
+ *
+ * The defaults are chosen against the board we actually have: 29.5 MB free
+ * on the rootfs. A 4 MB file is big enough that rotation is rare and small
+ * enough to scp off a slow link; a 16 MB total leaves well over half the
+ * free space for the OS. Both are deliberately conservative -- the point is
+ * that the logger cannot fill the disk, not that it should hoard. */
+#define DEFAULT_MAX_FILE_BYTES   (4ULL  * 1024 * 1024)
+#define DEFAULT_MAX_TOTAL_BYTES  (16ULL * 1024 * 1024)
+
+/* How many captures we are willing to consider when pruning. Far more than
+ * the budget above can hold; it exists so the scan needs no allocation. */
+#define MAX_PRUNE_ENTRIES 256
+
 /* Set by the signal handler; checked by the main loop. sig_atomic_t is the
  * only type the C standard promises can be written by a handler and read by
  * the main flow without tearing. volatile stops the compiler caching it in
  * a register across the loop. */
-static volatile sig_atomic_t stop_requested = 0;
+static volatile sig_atomic_t stop_requested   = 0;
+static volatile sig_atomic_t rotate_requested = 0;
 
 static void on_signal(int signo)
 {
     (void)signo;
     stop_requested = 1;
+}
+
+/* SIGHUP means "start a new file here", the same thing it means to every
+ * daemon logrotate drives. Safe to use only because the serial port is
+ * opened O_NOCTTY -- see the comment at that open() -- so a hangup on the
+ * wire can never deliver this to us and be mistaken for an operator. */
+static void on_hangup(int signo)
+{
+    (void)signo;
+    rotate_requested = 1;
 }
 
 /* Map a human baud rate onto the speed_t constant termios wants. There is no
@@ -138,6 +214,237 @@ static int configure_port(int fd, speed_t speed)
     return tcsetattr(fd, TCSANOW, &tio);
 }
 
+/* ------------------------------------------------------------------------
+ * Time helpers
+ * ------------------------------------------------------------------------ */
+
+/* CLOCK_MONOTONIC counts since boot and is NEVER stepped by NTP, which is
+ * exactly why it is the right clock for "how long have I been running".
+ * CLOCK_REALTIME is the wall clock and is the one that lies. */
+static long long monotonic_ms(void)
+{
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0;
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void make_stamp(time_t when, char *out, size_t outsz)
+{
+    struct tm tm_when;
+
+    localtime_r(&when, &tm_when);
+    strftime(out, outsz, "%Y-%m-%d_%H-%M-%S", &tm_when);
+}
+
+/* Arm (or re-arm) the cancel-on-set watch.
+ *
+ * TFD_TIMER_CANCEL_ON_SET only has meaning together with TFD_TIMER_ABSTIME
+ * on a CLOCK_REALTIME timer -- the kernel needs an absolute deadline to
+ * decide the deadline became meaningless. The deadline itself is a formality
+ * here: we want the cancellation, not the expiry. A year out is used rather
+ * than time_t's maximum because time_t is 32 bits on this ARMv6 target, so
+ * the maximum is 2038 -- an arbitrary date that is no longer comfortably
+ * far away.
+ *
+ * Must be re-armed after every cancellation, or we only ever notice the
+ * first clock step. */
+static int clock_watch_arm(int fd)
+{
+    struct itimerspec its;
+
+    memset(&its, 0, sizeof(its));
+    its.it_value.tv_sec = time(NULL) + 365 * 24 * 60 * 60;
+
+    return timerfd_settime(fd, TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET,
+                           &its, NULL);
+}
+
+/* ------------------------------------------------------------------------
+ * Log file helpers
+ * ------------------------------------------------------------------------ */
+
+/* Open a fresh capture, stamped with the current wall clock.
+ *
+ * O_EXCL, not plain O_CREAT: if two files would land on the same second --
+ * a rotation triggered twice quickly, or a restart inside one second -- we
+ * want a second FILE, not two writers appending into one. The -N suffix is
+ * the escape hatch. Returns the fd and fills in both stamp and path. */
+static int open_log(const char *logdir, const char *devname,
+                    char *stamp, size_t stampsz,
+                    char *path,  size_t pathsz)
+{
+    int n;
+
+    make_stamp(time(NULL), stamp, stampsz);
+
+    for (n = 0; n < 100; n++) {
+        int fd;
+
+        if (n == 0)
+            snprintf(path, pathsz, "%s/session_%s_%s.log",
+                     logdir, devname, stamp);
+        else
+            snprintf(path, pathsz, "%s/session_%s_%s-%d.log",
+                     logdir, devname, stamp, n);
+
+        fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_APPEND, 0644);
+        if (fd >= 0)
+            return fd;
+        if (errno != EEXIST)
+            break;
+    }
+    return -1;
+}
+
+/* Read a byte count from the environment, so the limits are configurable
+ * from /etc/default/serial-logger without a rebuild. */
+static unsigned long long env_bytes(const char *name, unsigned long long dflt)
+{
+    const char        *v = getenv(name);
+    char              *end;
+    unsigned long long n;
+
+    if (v == NULL || *v == '\0')
+        return dflt;
+
+    errno = 0;
+    n = strtoull(v, &end, 10);
+    if (end == v || errno != 0)
+        return dflt;
+    return n;
+}
+
+/* Join a directory and a file name, refusing to produce a truncated path.
+ *
+ * snprintf() truncates safely -- it will not overflow -- but a truncated
+ * path still NAMES something, and in a function whose next move is unlink()
+ * that is the one failure mode worth being paranoid about. logdir can be up
+ * to PATH_MAX and a name up to NAME_MAX, so the sum genuinely can overflow;
+ * GCC's -Wformat-truncation is right to say so. Returns 0 on success. */
+static int join_path(char *out, size_t outsz, const char *dir, const char *name)
+{
+    size_t dirlen  = strlen(dir);
+    size_t namelen = strlen(name);
+
+    /* Checked BEFORE writing rather than after. snprintf() would be safe
+     * from overflow either way, but it would also hand back a truncated
+     * path that still names something -- and the caller's next move is
+     * unlink(). Measuring first makes the refusal unambiguous, and it also
+     * stops -Wformat-truncation complaining about a risk we had already
+     * handled. +2 covers the '/' and the terminator. */
+    if (dirlen + namelen + 2 > outsz)
+        return -1;
+
+    memcpy(out, dir, dirlen);
+    out[dirlen] = '/';
+    memcpy(out + dirlen + 1, name, namelen);
+    out[dirlen + 1 + namelen] = '\0';
+    return 0;
+}
+
+/* Delete the oldest captures for THIS device until the directory's total
+ * for this device is within budget.
+ *
+ * Scoped by the "session_<dev>_" prefix on purpose: two adapters can be
+ * logging at once, and an instance must not delete the other instance's
+ * work. It means the budget is per device rather than per disk, which is
+ * the predictable behaviour even if it is not the tightest one.
+ *
+ * keep_path is never deleted -- it is the file currently open for writing,
+ * and it is counted toward the total so the budget stays honest.
+ *
+ * HOW TIGHT IS THE BUDGET, REALLY: pruning runs at rotation boundaries, so
+ * between two rotations the open file keeps growing with nothing trimming
+ * it. Worst-case usage is therefore budget + max_file_bytes, not budget --
+ * measured at 15424 bytes against a 12288 budget in the host tests. That is
+ * still BOUNDED, which is the property that matters; it is simply not a
+ * hard ceiling, and sizing a partition off this number should allow for the
+ * extra file. */
+static void prune_old_logs(const char *logdir, const char *devname,
+                           const char *keep_path, unsigned long long budget)
+{
+    struct { char name[NAME_MAX + 1]; time_t mtime; off_t size; }
+                        ents[MAX_PRUNE_ENTRIES];
+    char                prefix[NAME_MAX + 1];
+    const char         *keep_name;
+    unsigned long long  total = 0;
+    int                 count = 0;
+    DIR                *d;
+    struct dirent      *de;
+
+    if (budget == 0)                 /* 0 means "no limit" */
+        return;
+
+    snprintf(prefix, sizeof(prefix), "session_%s_", devname);
+
+    keep_name = strrchr(keep_path, '/');
+    keep_name = keep_name ? keep_name + 1 : keep_path;
+
+    d = opendir(logdir);
+    if (d == NULL)
+        return;
+
+    while ((de = readdir(d)) != NULL && count < MAX_PRUNE_ENTRIES) {
+        char        full[PATH_MAX];
+        struct stat st;
+
+        if (strncmp(de->d_name, prefix, strlen(prefix)) != 0)
+            continue;
+
+        if (join_path(full, sizeof(full), logdir, de->d_name) != 0)
+            continue;
+        if (stat(full, &st) != 0 || !S_ISREG(st.st_mode))
+            continue;
+
+        total += (unsigned long long)st.st_size;
+
+        /* The open file counts toward the total but is not a candidate. */
+        if (strcmp(de->d_name, keep_name) == 0)
+            continue;
+
+        snprintf(ents[count].name, sizeof(ents[count].name), "%s", de->d_name);
+        ents[count].mtime = st.st_mtime;
+        ents[count].size  = st.st_size;
+        count++;
+    }
+    closedir(d);
+
+    /* Repeatedly take the oldest remaining candidate. A selection scan is
+     * O(n^2), which for a handful of files is free and avoids qsort and a
+     * comparison function for no benefit. */
+    while (total > budget && count > 0) {
+        char full[PATH_MAX];
+        int  oldest = 0, i;
+
+        for (i = 1; i < count; i++)
+            if (ents[i].mtime < ents[oldest].mtime)
+                oldest = i;
+
+        if (join_path(full, sizeof(full), logdir, ents[oldest].name) != 0) {
+            /* Cannot name it safely, so do not touch it -- and drop it from
+             * the candidate list so the loop still terminates. */
+            ents[oldest] = ents[count - 1];
+            count--;
+            continue;
+        }
+        if (unlink(full) == 0) {
+            total -= (unsigned long long)ents[oldest].size;
+            /* Say so in the journal. Deleting someone's capture silently
+             * would be the wrong kind of helpful. */
+            fprintf(stderr, "pruned %s (%lld bytes) to stay under %llu\n",
+                    ents[oldest].name, (long long)ents[oldest].size, budget);
+        } else {
+            fprintf(stderr, "cannot remove %s: %s\n", full, strerror(errno));
+            /* Do not spin on a file we cannot delete. */
+            total = 0;
+        }
+        ents[oldest] = ents[count - 1];
+        count--;
+    }
+}
+
 int main(int argc, char **argv)
 {
     const char *device, *logdir;
@@ -146,12 +453,13 @@ int main(int argc, char **argv)
     char        path[PATH_MAX];
     char        stamp[32];
     const char *devname;
-    struct tm   tm_now;
-    time_t      now;
-    int         serial_fd, log_fd;
+    int         serial_fd, log_fd, clock_fd;
     size_t      unsynced = 0;
+    unsigned long long written = 0;
+    unsigned long long max_file_bytes, max_total_bytes;
+    long long   mono_start;
     struct sigaction sa;
-    struct pollfd pfd;
+    struct pollfd pfds[2];
 
     if (argc < 2 || argc > 4) {
         fprintf(stderr, "usage: %s <device> [baud] [logdir]\n", argv[0]);
@@ -175,6 +483,10 @@ int main(int argc, char **argv)
     sigaction(SIGTERM, &sa, NULL);
     sigaction(SIGINT,  &sa, NULL);
 
+    /* SIGHUP is rotation, not shutdown. Same struct, different handler. */
+    sa.sa_handler = on_hangup;
+    sigaction(SIGHUP, &sa, NULL);
+
     /* O_NOCTTY matters: without it, opening a tty from a process without a
      * controlling terminal (which is every systemd service) would make this
      * port our controlling terminal, and a hangup on the wire would then
@@ -192,20 +504,18 @@ int main(int argc, char **argv)
     }
 
     /* Log file name carries the device, so two adapters logging at once
-     * cannot collide — the old single-instance design could not do this.
-     *
-     * CAVEAT worth knowing on this board: a Pi has no battery-backed RTC.
-     * Until systemd-timesyncd talks to an NTP server, the clock is whatever
-     * it was restored to from /var/lib/systemd/timesync/clock — roughly the
-     * last shutdown time, not the truth. Early-boot log names can therefore
-     * be wrong by however long the box was off. Correct answer if that ever
-     * matters is a real RTC; this is just a note so it isn't a surprise. */
+     * cannot collide — the old single-instance design could not do this. */
     devname = strrchr(device, '/');
     devname = devname ? devname + 1 : device;
 
-    now = time(NULL);
-    localtime_r(&now, &tm_now);
-    strftime(stamp, sizeof(stamp), "%Y-%m-%d_%H-%M-%S", &tm_now);
+    /* Baseline for the clock correction (point 5 at the top). Taken BEFORE
+     * the file is opened, so "how long have I been running" is never an
+     * underestimate. CLOCK_MONOTONIC cannot be stepped, which is the whole
+     * reason this works. */
+    mono_start = monotonic_ms();
+
+    max_file_bytes  = env_bytes("LOGGER_MAX_FILE_BYTES",  DEFAULT_MAX_FILE_BYTES);
+    max_total_bytes = env_bytes("LOGGER_MAX_TOTAL_BYTES", DEFAULT_MAX_TOTAL_BYTES);
 
     /* One level is enough: /var/log exists, we only add the last component.
      * EEXIST is the normal case on every boot after the first. */
@@ -215,22 +525,73 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    snprintf(path, sizeof(path), "%s/session_%s_%s.log", logdir, devname, stamp);
-
-    log_fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    log_fd = open_log(logdir, devname, stamp, sizeof(stamp),
+                      path, sizeof(path));
     if (log_fd < 0) {
-        fprintf(stderr, "cannot open %s: %s\n", path, strerror(errno));
+        fprintf(stderr, "cannot open a log in %s: %s\n", logdir, strerror(errno));
         close(serial_fd);
         return 1;
     }
 
-    fprintf(stderr, "logging %s at %ld baud to %s\n", device, baud, path);
+    /* Make room before writing, not after filling the disk. */
+    prune_old_logs(logdir, devname, path, max_total_bytes);
 
-    pfd.fd     = serial_fd;
-    pfd.events = POLLIN;
+    fprintf(stderr, "logging %s at %ld baud to %s\n", device, baud, path);
+    fprintf(stderr, "limits: %llu bytes/file, %llu bytes total (0 = unlimited)\n",
+            max_file_bytes, max_total_bytes);
+
+    /* The clock watch. Failing to create it is NOT fatal: the logger's job
+     * is capturing bytes, and a wrong file name is worth far less than a
+     * missed boot. We log it and carry on with a negative fd, which poll()
+     * ignores. */
+    clock_fd = timerfd_create(CLOCK_REALTIME, TFD_NONBLOCK | TFD_CLOEXEC);
+    if (clock_fd < 0) {
+        fprintf(stderr, "no clock watch (%s); file name will not self-correct\n",
+                strerror(errno));
+    } else if (clock_watch_arm(clock_fd) != 0) {
+        fprintf(stderr, "cannot arm clock watch: %s\n", strerror(errno));
+        close(clock_fd);
+        clock_fd = -1;
+    }
+
+    pfds[0].fd     = serial_fd;
+    pfds[0].events = POLLIN;
+    pfds[1].fd     = clock_fd;    /* negative when unavailable; poll skips it */
+    pfds[1].events = POLLIN;
 
     while (!stop_requested) {
-        int ready = poll(&pfd, 1, FSYNC_IDLE_MS);
+        int ready;
+
+        /* Rotation happens here, at the top, rather than inside the signal
+         * handler -- a handler may only set a flag. Reached either from
+         * SIGHUP or from the size cap below. */
+        if (rotate_requested) {
+            rotate_requested = 0;
+
+            if (unsynced > 0)
+                fsync(log_fd);
+            close(log_fd);
+
+            /* The file just closed is now an ordinary candidate for
+             * pruning, so pass no keep_path. */
+            prune_old_logs(logdir, devname, "", max_total_bytes);
+
+            log_fd = open_log(logdir, devname, stamp, sizeof(stamp),
+                              path, sizeof(path));
+            if (log_fd < 0) {
+                fprintf(stderr, "rotate: cannot open a new log: %s\n",
+                        strerror(errno));
+                break;
+            }
+            unsynced = 0;
+            written  = 0;
+            /* New file, new baseline: if the clock is still wrong, the
+             * correction should fix THIS file's name, not the old one's. */
+            mono_start = monotonic_ms();
+            fprintf(stderr, "rotated to %s\n", path);
+        }
+
+        ready = poll(pfds, 2, FSYNC_IDLE_MS);
 
         if (ready < 0) {
             if (errno == EINTR)     /* a signal arrived; loop re-checks the flag */
@@ -249,14 +610,58 @@ int main(int argc, char **argv)
             continue;
         }
 
+        /* --- the wall clock was stepped (point 5 at the top) ------------ */
+        if (clock_fd >= 0 && (pfds[1].revents & POLLIN)) {
+            uint64_t ticks;
+            ssize_t  r = read(clock_fd, &ticks, sizeof(ticks));
+
+            /* ECANCELED is the signal we actually want: the kernel is
+             * telling us the absolute deadline became meaningless because
+             * CLOCK_REALTIME jumped. A successful read means the timer
+             * merely expired, which we do not care about. */
+            if (r < 0 && errno == ECANCELED) {
+                long long elapsed_ms = monotonic_ms() - mono_start;
+                time_t    true_start = time(NULL) - (time_t)(elapsed_ms / 1000);
+                char      new_stamp[32];
+                char      new_path[PATH_MAX];
+
+                make_stamp(true_start, new_stamp, sizeof(new_stamp));
+
+                if (strcmp(new_stamp, stamp) != 0) {
+                    snprintf(new_path, sizeof(new_path),
+                             "%s/session_%s_%s.log", logdir, devname, new_stamp);
+
+                    if (access(new_path, F_OK) == 0) {
+                        fprintf(stderr, "clock stepped, but %s exists; "
+                                        "keeping %s\n", new_path, path);
+                    } else if (rename(path, new_path) == 0) {
+                        /* An open fd refers to the FILE, not to the name,
+                         * so the rename is invisible to the writing we are
+                         * doing: no reopen, no gap, not a byte lost. */
+                        snprintf(path,  sizeof(path),  "%s", new_path);
+                        snprintf(stamp, sizeof(stamp), "%s", new_stamp);
+                        fprintf(stderr, "clock stepped; renamed log to %s\n",
+                                path);
+                    } else {
+                        fprintf(stderr, "cannot rename %s -> %s: %s\n",
+                                path, new_path, strerror(errno));
+                    }
+                }
+            }
+
+            /* Re-arm unconditionally, or we would only ever notice the
+             * first step of the clock. */
+            clock_watch_arm(clock_fd);
+        }
+
         /* POLLHUP/POLLERR is how an unplug shows up. Exit cleanly and let
          * systemd's BindsTo= tear the unit down — no crash loop. */
-        if (pfd.revents & (POLLHUP | POLLERR | POLLNVAL)) {
+        if (pfds[0].revents & (POLLHUP | POLLERR | POLLNVAL)) {
             fprintf(stderr, "%s disappeared\n", device);
             break;
         }
 
-        if (pfd.revents & POLLIN) {
+        if (pfds[0].revents & POLLIN) {
             char    buf[READ_CHUNK];
             ssize_t n = read(serial_fd, buf, sizeof(buf));
 
@@ -287,10 +692,17 @@ int main(int argc, char **argv)
             }
 
             unsynced += (size_t)n;
+            written  += (unsigned long long)n;
+
             if (unsynced >= FSYNC_BYTES) {
                 fsync(log_fd);
                 unsynced = 0;
             }
+
+            /* Size cap. Handled by setting the same flag SIGHUP sets, so
+             * there is exactly one rotation path to reason about. */
+            if (max_file_bytes != 0 && written >= max_file_bytes)
+                rotate_requested = 1;
         }
     }
 
@@ -300,6 +712,8 @@ done:
 
     close(log_fd);
     close(serial_fd);
+    if (clock_fd >= 0)
+        close(clock_fd);
 
     fprintf(stderr, "stopped logging %s\n", device);
     return 0;
