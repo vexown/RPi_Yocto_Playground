@@ -26,6 +26,48 @@
 # subnet.
 #
 # ---------------------------------------------------------------------------
+# THE ALTERNATIVE WE DID NOT BUILD (considered 2026-10-04)
+# ---------------------------------------------------------------------------
+# The usual way to solve this is UDP discovery: the device listens on a port,
+# the client sends ONE broadcast datagram, and every device that recognises
+# the payload replies with its identity. mDNS/DNS-SD, SSDP and WS-Discovery
+# are standardised versions; most industrial kit ships something bespoke.
+#
+# It is better than this script on nearly every axis. One packet instead of
+# 254. A /16 costs the same as a /24, where sweeping a /16 is unusable. The
+# reply carries a name, model, serial and firmware version instead of just
+# "something with this MAC exists", so two identical boards are trivially
+# distinguishable. The client is a UDP socket, so it is not Linux-only the
+# way `ip neigh` is. And it does not look like a port scan on a corporate
+# network.
+#
+# Two reasons we are still doing it this way.
+#
+#   1. ARP IS ANSWERED BY THE KERNEL. If the board boots, associates, and
+#      then every userspace service falls over, it STILL answers ARP. A
+#      discovery daemon does not. This is a debugging tool, so the sick-board
+#      case is the case it exists for -- and "it is on the network but ssh is
+#      not answering" versus "it never joined" are completely different
+#      diagnoses. A beacon would be broken in precisely the situation where
+#      the answer matters most.
+#   2. Nothing at all has to run on the board, which is the whole design
+#      brief for this image.
+#
+# Note that (2) argues against avahi far more than against a beacon, and the
+# paragraph above slightly overstates its case. avahi really is unacceptable
+# here -- it drags in dbus, a bus daemon and an ordering dependency on the
+# network, on a 100 MB rootfs with ~29 MB free. But a bespoke responder is
+# perhaps 80 lines, one socket, no dependencies, and under systemd socket
+# activation it would not run at all until a packet arrived: no boot cost, no
+# idle footprint. The footprint objection does not really survive that; only
+# reason (1) does.
+#
+# So this is parked, not rejected -- and if it is ever built it should be an
+# ADDITION. Beacon for the fast, informative path; this sweep as the fallback
+# for a board that is too sick to answer it. Neither helps against client
+# isolation on a hotspot, which blocks broadcast UDP exactly as it blocks ARP.
+#
+# ---------------------------------------------------------------------------
 # WHAT WENT WRONG THE FIRST TIME THIS WAS USED IN ANGER  (session 26)
 # ---------------------------------------------------------------------------
 # It "took forever" on a work laptop and had to be abandoned. The bug was in
