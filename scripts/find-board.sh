@@ -68,8 +68,10 @@
 #
 #   BOARD_MAC in network.env — exact, if you have recorded it (run
 #                              `ip link show wlan0` on the board once)
-#   the OUI                  — the first three bytes are assigned to the
-#                              manufacturer, and Raspberry Pi has a handful
+#   the IEEE prefix          — the leading bytes of a MAC are assigned to
+#                              the manufacturer. Raspberry Pi holds ten
+#                              blocks, and they are NOT all three bytes
+#                              long — see RPI_OUIS below.
 #
 # The MACs come from the host's ARP cache (`ip neigh`), not from nmap. Any
 # packet sent to a host on the local wire populates that cache as a side
@@ -82,13 +84,41 @@
 # once dropbear is up, which is later than it answers ARP.
 set -euo pipefail
 
-# Raspberry Pi Foundation / Raspberry Pi Ltd OUI prefixes, lowercase.
+# First 24 bits (3 bytes) of a MAC address are assigned by the IEEE to an organization.
+# This allows us to identify Raspberry Pi boards by their MAC address prefix, even if we don't know the full MAC address.
+# This part of the MAC is called OUI (Organizationally Unique Identifier).
+#
+# Raspberry Pi Foundation / Raspberry Pi Ltd MAC prefixes, lowercase.
+#
+# SOURCE: the IEEE Registration Authority public registry listing, searched
+# for "Raspberry Pi" on 2026-10-04:
+#   https://regauth.standards.ieee.org/standards-ra-web/pub/view.html#registries
+#
+# NOT ALL PREFIXES ARE THREE BYTES. IEEE sells address blocks in three sizes and Raspberry Pi
+# holds at least one of each:
+#
+#   MA-L   24-bit prefix,  6 hex digits   b8:27:eb         the classic "OUI",
+#                                                          2^24 addresses
+#   MA-M   28-bit prefix,  7 hex digits   f0:40:af:9       the low nibble is
+#                                                          split between up to
+#                                                          16 companies
+#   MA-S   36-bit prefix,  9 hex digits   8c:1f:64:34:a    only 4096 addresses
+#
+# So the match below is a plain string prefix with NO trailing colon. An
+# appended ":" would hard-code the 24-bit assumption and silently never match
+# the MA-M or MA-S entries. For the same reason, do not "tidy" the
+# odd-length entries into six digits: f0:40:af on its own would claim the
+# fifteen other companies sharing that block.
+#
 # b8:27:eb is the one on a Zero W; the rest are here so this script keeps
 # working on the Pi 5 and on whatever comes next. Note 2c:cf:67 is Raspberry
-# Pi Ltd and covers the Pico W as well as the Pi 4/5 — an OUI match is a
+# Pi Ltd and covers the Pico W as well as the Pi 4/5 — a prefix match is a
 # family match, not a board match. Record BOARD_MAC and this stops being a
 # guess.
-RPI_OUIS="b8:27:eb dc:a6:32 e4:5f:01 28:cd:c1 2c:cf:67 d8:3a:dd"
+RPI_OUIS="b8:27:eb dc:a6:32 e4:5f:01 28:cd:c1 2c:cf:67 d8:3a:dd"  # MA-L
+RPI_OUIS="$RPI_OUIS 88:a2:9e 98:fe:54"                            # MA-L
+RPI_OUIS="$RPI_OUIS f0:40:af:9"                                   # MA-M
+RPI_OUIS="$RPI_OUIS 8c:1f:64:34:a"                                # MA-S
 
 # Interfaces that cannot possibly hold the board, matched as name prefixes.
 # Tunnels (tun/tap/wg/tailscale/ppp/ipsec) carry routed traffic, not a local
@@ -127,7 +157,7 @@ for arg in "$@"; do
     case "$arg" in
         --ssh)  DO_SSH=yes ;;
         -h|--help)
-            sed -n '2,8p' "$0" | sed 's/^# \?//'
+            sed -n '2,7p' "$0" | sed 's/^# \?//'
             exit 0 ;;
         -*)     echo "unknown option: $arg" >&2; exit 2 ;;
         *)      TARGETS="$TARGETS $arg" ;;
@@ -275,7 +305,9 @@ if [ -z "$FOUND" ]; then
             [ "$mac" = "$BOARD_MAC" ] && match="exact MAC"
         else
             for oui in $RPI_OUIS; do
-                case "$mac" in "$oui":*) match="Raspberry Pi OUI $oui" ;; esac
+                # Prefix match with no ":" appended, because the prefixes are
+                # 24, 28 or 36 bits wide. See RPI_OUIS at the top.
+                case "$mac" in "$oui"*) match="Raspberry Pi prefix $oui" ;; esac
             done
         fi
         [ -n "$match" ] || continue
