@@ -86,6 +86,24 @@
  *    A bigger partition is NOT a fix for this. Any fixed amount of space
  *    loses to unbounded growth; it only changes the date. Bounding the
  *    growth works at any partition size.
+ *
+ * 7. Session 28 moved the captures onto their OWN PARTITION, grown on first
+ *    boot to fill whatever card the image lands on (8 GB, 16 GB, 64 GB --
+ *    the build cannot know). A fixed byte budget makes no sense against a
+ *    size nobody knows in advance, so the main limit is now FREE SPACE:
+ *    LOGGER_KEEP_FREE (default 10%) -- before opening a new file, delete
+ *    this device's oldest captures until at least that much of the
+ *    filesystem is free. It is measured with statvfs() at every rotation,
+ *    not once at startup, because on the very first boot the filesystem is
+ *    still being grown while the logger starts.
+ *
+ *    Why free space and not "90% of the disk per device": two adapters
+ *    with 90% each add up to 180%. Free space is one number for the whole
+ *    partition, so any number of instances respect it together. Each one
+ *    still deletes only its OWN files.
+ *
+ *    The per-device byte budget (LOGGER_MAX_TOTAL_BYTES) still exists for
+ *    anyone who wants one, but is off by default.
  */
 
 #define _GNU_SOURCE
@@ -100,6 +118,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/timerfd.h>
 #include <termios.h>
 #include <time.h>
@@ -116,20 +135,21 @@
 
 #define READ_CHUNK     1024
 
-/* Self-imposed limits, both overridable from /etc/default/serial-logger.
- * Zero disables either one.
+/* Self-imposed limits, all overridable from /etc/default/serial-logger.
+ * Zero disables any of them.
  *
- * The defaults are chosen against the board we actually have: 29.5 MB free
- * on the rootfs. A 4 MB file is big enough that rotation is rare and small
- * enough to scp off a slow link; a 16 MB total leaves well over half the
- * free space for the OS. Both are deliberately conservative -- the point is
- * that the logger cannot fill the disk, not that it should hoard. */
+ * A 4 MB file is big enough that rotation is rare and small enough to scp
+ * off a slow link.
+ *
+ * Keep-free is the limit that protects the disk (point 7 above). 10% of a
+ * 16 GB card is ~1.4 GB of headroom: far more than one file can overshoot
+ * by between two rotations, which is the only way usage gets past it.
+ *
+ * The per-device byte budget defaulted to 16 MB when captures shared a
+ * 100 MB rootfs (session 27). On a dedicated partition it is off. */
 #define DEFAULT_MAX_FILE_BYTES   (4ULL  * 1024 * 1024)
-#define DEFAULT_MAX_TOTAL_BYTES  (16ULL * 1024 * 1024)
-
-/* How many captures we are willing to consider when pruning. Far more than
- * the budget above can hold; it exists so the scan needs no allocation. */
-#define MAX_PRUNE_ENTRIES 256
+#define DEFAULT_MAX_TOTAL_BYTES  0ULL
+#define DEFAULT_KEEP_FREE        "10%"
 
 /* Set by the signal handler; checked by the main loop. sig_atomic_t is the
  * only type the C standard promises can be written by a handler and read by
@@ -230,12 +250,22 @@ static long long monotonic_ms(void)
     return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
+/* File names are UTC, and say so with a trailing "Z".
+ *
+ * They always WERE UTC: the image ships no time zone data, so localtime_r()
+ * quietly fell back to UTC and the names looked an hour (in summer two) off.
+ * Asking for UTC explicitly makes that a decision instead of an accident, and
+ * the Z -- ISO 8601's marker for "offset zero", read "Zulu" -- tells whoever
+ * reads the name which clock it is on.
+ *
+ * Why not local time: at the autumn change 02:00-03:00 happens twice, so
+ * names repeat and stop sorting in time order. UTC never jumps. */
 static void make_stamp(time_t when, char *out, size_t outsz)
 {
     struct tm tm_when;
 
-    localtime_r(&when, &tm_when);
-    strftime(out, outsz, "%Y-%m-%d_%H-%M-%S", &tm_when);
+    gmtime_r(&when, &tm_when);
+    strftime(out, outsz, "%Y-%m-%d_%H-%M-%SZ", &tm_when);
 }
 
 /* Arm (or re-arm) the cancel-on-set watch.
@@ -316,6 +346,82 @@ static unsigned long long env_bytes(const char *name, unsigned long long dflt)
     return n;
 }
 
+/* LOGGER_KEEP_FREE is either a percentage of the filesystem ("10%") or a
+ * plain byte count ("1073741824"). It is parsed once here but turned into
+ * bytes at every use (keep_free_bytes below), because the filesystem's size
+ * can change while we run: on the first boot it is grown under us. */
+struct keep_free {
+    unsigned int       pct;     /* nonzero: a percentage of the fs size  */
+    unsigned long long bytes;   /* otherwise: an absolute byte count     */
+};
+
+static int parse_keep_free(const char *v, struct keep_free *out)
+{
+    char              *end;
+    unsigned long long n;
+
+    errno = 0;
+    n = strtoull(v, &end, 10);
+    if (end == v || errno != 0)
+        return -1;
+    if (end[0] == '%' && end[1] == '\0') {
+        if (n > 100)
+            return -1;
+        out->pct   = (unsigned int)n;
+        out->bytes = 0;
+        return 0;
+    }
+    if (end[0] != '\0')
+        return -1;
+    out->pct   = 0;
+    out->bytes = n;
+    return 0;
+}
+
+static struct keep_free env_keep_free(const char *name, const char *dflt)
+{
+    const char      *v = getenv(name);
+    struct keep_free kf = { 0, 0 };
+
+    if (v != NULL && *v != '\0') {
+        if (parse_keep_free(v, &kf) == 0)
+            return kf;
+        /* Say so rather than silently ignoring a typo in the config. */
+        fprintf(stderr, "%s=\"%s\" is neither N%% nor a byte count; "
+                        "using %s\n", name, v, dflt);
+    }
+    parse_keep_free(dflt, &kf);
+    return kf;
+}
+
+/* How many bytes must stay free on the filesystem holding dir, right now.
+ * 0 means "no limit" -- including when statvfs() fails, because deleting
+ * captures on the strength of a number we could not read is the wrong way
+ * to fail. */
+static unsigned long long keep_free_bytes(const char *dir, struct keep_free kf)
+{
+    struct statvfs vfs;
+
+    if (kf.pct == 0)
+        return kf.bytes;
+    if (statvfs(dir, &vfs) != 0)
+        return 0;
+    return (unsigned long long)vfs.f_blocks * vfs.f_frsize / 100 * kf.pct;
+}
+
+/* Bytes an unprivileged writer could still use. f_bavail rather than
+ * f_bfree: on ext4 the difference is the root-reserved blocks. We run as
+ * root and could use them, but counting them as free would let the logger
+ * eat the margin ext4 keeps for exactly this kind of emergency. */
+static unsigned long long fs_free_bytes(const char *dir)
+{
+    struct statvfs vfs;
+
+    if (statvfs(dir, &vfs) != 0)
+        return ULLONG_MAX;          /* unknown: never prune on its account */
+    return (unsigned long long)vfs.f_bavail * vfs.f_frsize;
+}
+
 /* Join a directory and a file name, refusing to produce a truncated path.
  *
  * snprintf() truncates safely -- it will not overflow -- but a truncated
@@ -344,37 +450,56 @@ static int join_path(char *out, size_t outsz, const char *dir, const char *name)
     return 0;
 }
 
-/* Delete the oldest captures for THIS device until the directory's total
- * for this device is within budget.
+/* Delete the oldest captures for THIS device until BOTH limits hold:
+ *   - this device's captures total no more than budget (0 = no budget), and
+ *   - the filesystem has at least keep_free of free space.
  *
  * Scoped by the "session_<dev>_" prefix on purpose: two adapters can be
  * logging at once, and an instance must not delete the other instance's
- * work. It means the budget is per device rather than per disk, which is
- * the predictable behaviour even if it is not the tightest one.
+ * work. So the byte budget is per device. Keep-free is per filesystem, which
+ * is what makes it safe with any number of instances (point 7 at the top).
  *
  * keep_path is never deleted -- it is the file currently open for writing,
  * and it is counted toward the total so the budget stays honest.
  *
- * HOW TIGHT IS THE BUDGET, REALLY: pruning runs at rotation boundaries, so
+ * HOW TIGHT ARE THE LIMITS, REALLY: pruning runs at rotation boundaries, so
  * between two rotations the open file keeps growing with nothing trimming
- * it. Worst-case usage is therefore budget + max_file_bytes, not budget --
- * measured at 15424 bytes against a 12288 budget in the host tests. That is
- * still BOUNDED, which is the property that matters; it is simply not a
- * hard ceiling, and sizing a partition off this number should allow for the
- * extra file. */
-static void prune_old_logs(const char *logdir, const char *devname,
-                           const char *keep_path, unsigned long long budget)
+ * it. Worst case is one max_file_bytes past either limit -- measured at
+ * 15424 bytes against a 12288 budget in the host tests. BOUNDED, which is
+ * the property that matters, but not a hard ceiling.
+ *
+ * The list is allocated, not a fixed array. The old fixed array held 256
+ * entries, which was plenty against a 16 MB budget and would have been a
+ * silent bug on a whole-card partition: at 4 MB per file a 16 GB card holds
+ * ~3,500 captures, and every file past the 256th was neither counted nor
+ * considered for deletion. */
+struct capture {
+    char  *name;
+    time_t mtime;
+    off_t  size;
+};
+
+static int oldest_first(const void *a, const void *b)
 {
-    struct { char name[NAME_MAX + 1]; time_t mtime; off_t size; }
-                        ents[MAX_PRUNE_ENTRIES];
+    const struct capture *x = a, *y = b;
+
+    return (x->mtime > y->mtime) - (x->mtime < y->mtime);
+}
+
+static void prune_old_logs(const char *logdir, const char *devname,
+                           const char *keep_path, unsigned long long budget,
+                           struct keep_free kf)
+{
+    struct capture     *ents = NULL;
+    size_t              count = 0, cap = 0, i;
     char                prefix[NAME_MAX + 1];
     const char         *keep_name;
-    unsigned long long  total = 0;
-    int                 count = 0;
+    unsigned long long  total = 0, need;
     DIR                *d;
     struct dirent      *de;
 
-    if (budget == 0)                 /* 0 means "no limit" */
+    need = keep_free_bytes(logdir, kf);
+    if (budget == 0 && need == 0)    /* both limits off */
         return;
 
     snprintf(prefix, sizeof(prefix), "session_%s_", devname);
@@ -386,7 +511,7 @@ static void prune_old_logs(const char *logdir, const char *devname,
     if (d == NULL)
         return;
 
-    while ((de = readdir(d)) != NULL && count < MAX_PRUNE_ENTRIES) {
+    while ((de = readdir(d)) != NULL) {
         char        full[PATH_MAX];
         struct stat st;
 
@@ -404,45 +529,70 @@ static void prune_old_logs(const char *logdir, const char *devname,
         if (strcmp(de->d_name, keep_name) == 0)
             continue;
 
-        snprintf(ents[count].name, sizeof(ents[count].name), "%s", de->d_name);
+        if (count == cap) {
+            size_t          ncap = cap ? cap * 2 : 64;
+            struct capture *n    = realloc(ents, ncap * sizeof(*ents));
+
+            if (n == NULL) {
+                /* Out of memory: prune with what we have rather than not
+                 * at all. Say so, because the total is now an undercount. */
+                fprintf(stderr, "prune: out of memory listing %s\n", logdir);
+                break;
+            }
+            ents = n;
+            cap  = ncap;
+        }
+        ents[count].name = strdup(de->d_name);
+        if (ents[count].name == NULL)
+            break;
         ents[count].mtime = st.st_mtime;
         ents[count].size  = st.st_size;
         count++;
     }
     closedir(d);
 
-    /* Repeatedly take the oldest remaining candidate. A selection scan is
-     * O(n^2), which for a handful of files is free and avoids qsort and a
-     * comparison function for no benefit. */
-    while (total > budget && count > 0) {
+    qsort(ents, count, sizeof(*ents), oldest_first);
+
+    for (i = 0; i < count; i++) {
         char full[PATH_MAX];
-        int  oldest = 0, i;
+        int  over_budget = budget != 0 && total > budget;
+        int  short_space = need != 0 && fs_free_bytes(logdir) < need;
 
-        for (i = 1; i < count; i++)
-            if (ents[i].mtime < ents[oldest].mtime)
-                oldest = i;
+        if (!over_budget && !short_space)
+            break;
 
-        if (join_path(full, sizeof(full), logdir, ents[oldest].name) != 0) {
-            /* Cannot name it safely, so do not touch it -- and drop it from
-             * the candidate list so the loop still terminates. */
-            ents[oldest] = ents[count - 1];
-            count--;
+        /* Cannot name it safely, so do not touch it. */
+        if (join_path(full, sizeof(full), logdir, ents[i].name) != 0)
             continue;
-        }
+
         if (unlink(full) == 0) {
-            total -= (unsigned long long)ents[oldest].size;
+            total -= (unsigned long long)ents[i].size;
             /* Say so in the journal. Deleting someone's capture silently
              * would be the wrong kind of helpful. */
-            fprintf(stderr, "pruned %s (%lld bytes) to stay under %llu\n",
-                    ents[oldest].name, (long long)ents[oldest].size, budget);
+            if (over_budget)
+                fprintf(stderr, "pruned %s (%lld bytes) to stay under the "
+                                "%llu-byte budget\n",
+                        ents[i].name, (long long)ents[i].size, budget);
+            else
+                fprintf(stderr, "pruned %s (%lld bytes) to keep %llu bytes "
+                                "free\n",
+                        ents[i].name, (long long)ents[i].size, need);
         } else {
             fprintf(stderr, "cannot remove %s: %s\n", full, strerror(errno));
-            /* Do not spin on a file we cannot delete. */
-            total = 0;
         }
-        ents[oldest] = ents[count - 1];
-        count--;
     }
+
+    /* Ran out of our own files and the disk is still short: something else
+     * is filling it (another instance, or files put there by hand). We do
+     * not touch what is not ours, but we do not keep quiet about it. */
+    if (need != 0 && fs_free_bytes(logdir) < need)
+        fprintf(stderr, "warning: %s has less than %llu bytes free and no "
+                        "older %s* captures left to delete\n",
+                logdir, need, prefix);
+
+    for (i = 0; i < count; i++)
+        free(ents[i].name);
+    free(ents);
 }
 
 int main(int argc, char **argv)
@@ -457,6 +607,7 @@ int main(int argc, char **argv)
     size_t      unsynced = 0;
     unsigned long long written = 0;
     unsigned long long max_file_bytes, max_total_bytes;
+    struct keep_free keep_free;
     long long   mono_start;
     struct sigaction sa;
     struct pollfd pfds[2];
@@ -516,6 +667,7 @@ int main(int argc, char **argv)
 
     max_file_bytes  = env_bytes("LOGGER_MAX_FILE_BYTES",  DEFAULT_MAX_FILE_BYTES);
     max_total_bytes = env_bytes("LOGGER_MAX_TOTAL_BYTES", DEFAULT_MAX_TOTAL_BYTES);
+    keep_free       = env_keep_free("LOGGER_KEEP_FREE", DEFAULT_KEEP_FREE);
 
     /* One level is enough: /var/log exists, we only add the last component.
      * EEXIST is the normal case on every boot after the first. */
@@ -534,11 +686,17 @@ int main(int argc, char **argv)
     }
 
     /* Make room before writing, not after filling the disk. */
-    prune_old_logs(logdir, devname, path, max_total_bytes);
+    prune_old_logs(logdir, devname, path, max_total_bytes, keep_free);
 
     fprintf(stderr, "logging %s at %ld baud to %s\n", device, baud, path);
-    fprintf(stderr, "limits: %llu bytes/file, %llu bytes total (0 = unlimited)\n",
-            max_file_bytes, max_total_bytes);
+    if (keep_free.pct != 0)
+        fprintf(stderr, "limits: %llu bytes/file, %llu bytes total, keep %u%% "
+                        "of the filesystem free (0 = unlimited)\n",
+                max_file_bytes, max_total_bytes, keep_free.pct);
+    else
+        fprintf(stderr, "limits: %llu bytes/file, %llu bytes total, keep %llu "
+                        "bytes free (0 = unlimited)\n",
+                max_file_bytes, max_total_bytes, keep_free.bytes);
 
     /* The clock watch. Failing to create it is NOT fatal: the logger's job
      * is capturing bytes, and a wrong file name is worth far less than a
@@ -574,7 +732,7 @@ int main(int argc, char **argv)
 
             /* The file just closed is now an ordinary candidate for
              * pruning, so pass no keep_path. */
-            prune_old_logs(logdir, devname, "", max_total_bytes);
+            prune_old_logs(logdir, devname, "", max_total_bytes, keep_free);
 
             log_fd = open_log(logdir, devname, stamp, sizeof(stamp),
                               path, sizeof(path));

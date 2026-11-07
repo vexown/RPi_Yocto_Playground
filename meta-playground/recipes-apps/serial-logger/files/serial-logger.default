@@ -39,13 +39,36 @@
 # Rotate to a new file once the current one reaches this size.
 #LOGGER_MAX_FILE_BYTES=4194304
 
-# Delete the OLDEST captures for this device until the total is back under
-# this. Scoped per device, so two adapters logging at once never delete each
-# other's work. Every deletion is reported to the journal.
+# --- The captures partition (session 28) -----------------------------------
 #
-# Note this is enforced at rotation boundaries, so real usage can reach
+# On the Zero W, /var/log/serial-logger is now its own partition, grown on
+# first boot to fill the card. How big that is depends on the card, so the
+# limit that protects it is expressed as FREE SPACE rather than bytes used.
+#
+# Before each new file, delete this device's OLDEST captures until at least
+# this much of the filesystem is free. Either a percentage of the filesystem
+# ("10%") or a byte count ("1073741824"). 0 disables it. Re-measured at every
+# rotation, so it follows the filesystem as it grows.
+#
+# Why free space and not "N% of the disk per device": two adapters with 90%
+# each add up to 180%. Free space is one number for the whole partition, so
+# any number of instances respect it together, while each still deletes only
+# its OWN files. Every deletion is reported to the journal, and so is running
+# out of own files to delete while the disk is still short.
+#
+# Like the budget below, this is enforced at rotation boundaries, so the
+# open file can take free space up to LOGGER_MAX_FILE_BYTES below the line
+# before it is trimmed. 10% of a 16 GB card is ~1.4 GB, which dwarfs that.
+#LOGGER_KEEP_FREE=10%
+
+# Optional per-device cap on the TOTAL size of this device's captures, in
+# bytes. Off (0) by default since session 28. It was 16 MB while captures
+# shared the 100 MB rootfs with the OS. Useful if one chatty device should
+# not be allowed to push out another device's history.
+#
+# Enforced at rotation boundaries, so real usage can reach
 # LOGGER_MAX_TOTAL_BYTES + LOGGER_MAX_FILE_BYTES before it is trimmed.
-#LOGGER_MAX_TOTAL_BYTES=16777216
+#LOGGER_MAX_TOTAL_BYTES=0
 
 # To start a new file by hand at an interesting moment:
 #     systemctl kill -s HUP serial-logger@ttyUSB0
