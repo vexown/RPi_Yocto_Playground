@@ -4,6 +4,8 @@
 # Usage:  ./scripts/find-board.sh              # scan the local subnet(s)
 #         ./scripts/find-board.sh 192.168.43.0/24
 #         ./scripts/find-board.sh --ssh        # find it, then connect
+#         ./scripts/find-board.sh --timeout 120  # keep trying this long (s)
+#                                                  default 60; 0 = one sweep
 #
 # ---------------------------------------------------------------------------
 # WHY THIS EXISTS
@@ -103,6 +105,28 @@
 # — same hotspot as yesterday — that answers in well under a second.
 #
 # ---------------------------------------------------------------------------
+# WHY IT SWEEPS MORE THAN ONCE  (session 28, 2026-11-06)
+# ---------------------------------------------------------------------------
+# The first real hotspot test found the board on the SECOND run, not the
+# first. The obvious story -- "the board had not got its address yet" -- was
+# checked against the board's own journal and is false: it had held its DHCP
+# lease for 56 s when the first sweep went out and saw nothing.
+#
+# A repeat probe with the board long up and the laptop long joined then missed
+# 1 sweep in 6 (2 in 9 counting the first run), on one phone, one evening.
+# So on a phone hotspot ONE EMPTY SWEEP IS NOT EVIDENCE OF ABSENCE. Why
+# a sweep misses is still open: WiFi power saving on the board (brcmfmac
+# enables it by default) and the phone's own AP behaviour are both
+# candidates. Running the same probe with the board on a home router
+# separates them.
+#
+# Whatever the cause, "run it again" was the fix, and a tool whose fix is
+# "run it again" should do that itself. So it keeps sweeping, a few seconds
+# apart, until it finds the board or TIMEOUT runs out. The same loop covers
+# the most common case of all: you have just powered the board, and it needs
+# ~20 s to get an address.
+#
+# ---------------------------------------------------------------------------
 # HOW IT IDENTIFIES THE BOARD
 # ---------------------------------------------------------------------------
 # By MAC address, which is the one property of the board that does NOT
@@ -115,11 +139,21 @@
 #                              blocks, and they are NOT all three bytes
 #                              long — see RPI_OUIS below.
 #
-# The MACs come from the host's ARP cache (`ip neigh`), not from nmap. Any
-# packet sent to a host on the local wire populates that cache as a side
-# effect, so the ping sweep fills it in whether or not nmap is running with
-# enough privilege to report MACs itself. That also means this script needs
-# no sudo.
+# Two sources, each used for what it is good at:
+#
+#   nmap      says WHO ANSWERED IN THIS SWEEP (its -oG output lists hosts
+#             that are Up). That is the "is it there now" question.
+#   ip neigh  says WHAT MAC an address has. Any packet sent to a host on the
+#             local wire fills the kernel's ARP cache as a side effect, so it
+#             works whether or not nmap has the privilege to report MACs
+#             itself -- which is why this script needs no sudo.
+#
+# The earlier version asked ip neigh alone, and took every entry that was not
+# FAILED. That includes STALE entries, which can be minutes old: a board that
+# answered an ssh session ten minutes ago and has since left would still have
+# been "found". With a retry loop that would be worse than a miss, because it
+# stops the loop on a lie. So ip neigh is now only consulted for addresses
+# nmap has just seen answer.
 #
 # Port 22 is used only as a tiebreaker/fallback, never as the primary
 # signal: plenty of things answer on 22, and the board answers on 22 only
@@ -192,20 +226,36 @@ BOARD_MAC="$(echo "$BOARD_MAC" | tr 'A-Z' 'a-z')"
 HOSTKEY_ALIAS="${HOSTKEY_ALIAS:-rpi0-logger}"
 SSH_OPTS="-o HostKeyAlias=$HOSTKEY_ALIAS -o CheckHostIP=no"
 
+# How long to keep sweeping before giving up, and the pause between sweeps.
+# 60 s is about four sweeps of a /24 on a hotspot (one takes 3-15 s), and it
+# covers a board that was powered on just before running this.
+TIMEOUT="${TIMEOUT:-60}"
+RETRY_GAP="${RETRY_GAP:-3}"
+
 # --- Arguments ---------------------------------------------------------------
+# A while/shift loop rather than `for arg`, because --timeout takes a value.
 DO_SSH=no
 TARGETS=""
-for arg in "$@"; do
-    case "$arg" in
+while [ $# -gt 0 ]; do
+    case "$1" in
         --ssh)  DO_SSH=yes ;;
+        --timeout)
+            [ $# -ge 2 ] || { echo "--timeout needs a number of seconds" >&2; exit 2; }
+            TIMEOUT="$2"; shift ;;
+        --timeout=*)
+            TIMEOUT="${1#--timeout=}" ;;
         -h|--help)
-            sed -n '2,7p' "$0" | sed 's/^# \?//'
+            sed -n '2,9p' "$0" | sed 's/^# \?//'
             exit 0 ;;
-        -*)     echo "unknown option: $arg" >&2; exit 2 ;;
-        *)      TARGETS="$TARGETS $arg" ;;
+        -*)     echo "unknown option: $1" >&2; exit 2 ;;
+        *)      TARGETS="$TARGETS $1" ;;
     esac
+    shift
 done
 TARGETS="${TARGETS# }"
+case "$TIMEOUT" in
+    ''|*[!0-9]*) echo "--timeout needs a whole number of seconds" >&2; exit 2 ;;
+esac
 
 # ---------------------------------------------------------------------------
 # STEP 0 — the shortcut: is it still where we last found it?
@@ -216,20 +266,38 @@ TARGETS="${TARGETS# }"
 #
 # We verify the MAC, not just the ping. Something else could have inherited
 # that address; answering to a ping is not evidence of being our board.
+#
+# Called once up front (loudly), and again before every later sweep (with
+# "quiet", one line): if the board was just powered on and is coming back at
+# yesterday's address, this is how the loop notices within a second.
+
+# The MAC the kernel has for an address, lowercase, or nothing.
+#   10.23.184.62 dev wlan0 lladdr b8:27:eb:cd:bd:ea REACHABLE
+neigh_mac() {
+    ip -4 neigh show "$1" 2>/dev/null | awk '/lladdr/{print tolower($5); exit}'
+}
+
 try_cached() {
     [ -f "$LAST_ADDR_FILE" ] || return 1
-    local ip mac
+    local ip mac quiet="${1:-}"
     ip="$(cat "$LAST_ADDR_FILE" 2>/dev/null)"
     [ -n "$ip" ] || return 1
-    echo ">>> Trying last known address $ip first..."
+    [ -n "$quiet" ] || echo ">>> Trying last known address $ip first..."
     # -c1 one packet, -W1 wait at most a second, -n no reverse DNS.
-    ping -c1 -W1 -n "$ip" >/dev/null 2>&1 || { echo "    no answer."; return 1; }
-    mac="$(ip -4 neigh show "$ip" 2>/dev/null | awk '/lladdr/{print tolower($5)}' | head -n1)"
-    if [ -n "$BOARD_MAC" ] && [ "$mac" != "$BOARD_MAC" ]; then
-        echo "    answered, but MAC $mac is not the board. Scanning properly."
+    if ! ping -c1 -W1 -n "$ip" >/dev/null 2>&1; then
+        if [ -n "$quiet" ]; then
+            echo "    last known address $ip: no answer"
+        else
+            echo "    no answer."
+        fi
         return 1
     fi
-    echo "    still there ($mac)"
+    mac="$(neigh_mac "$ip")"
+    if [ -n "$BOARD_MAC" ] && [ "$mac" != "$BOARD_MAC" ]; then
+        echo "    $ip answered, but MAC $mac is not the board."
+        return 1
+    fi
+    echo "    $ip still there ($mac)"
     FOUND="$ip"
     return 0
 }
@@ -285,12 +353,72 @@ command -v nmap >/dev/null || {
     exit 1
 }
 
-FOUND=""
+# ---------------------------------------------------------------------------
+# STEP 2 — one sweep: who answered just now, and is one of them the board?
+# ---------------------------------------------------------------------------
+# One nmap per target, announced and timed, so a slow sweep is visibly slow
+# rather than silently hung.
+#
+#   -sn  ping sweep only, no port scan
+#   -n   never do reverse DNS. On a hotspot there is no resolver worth
+#        waiting for, and this alone is the difference between 3 s and 30 s
+#   -T4  aggressive timing; fine on a local wire, and the point here is
+#        latency not stealth
+#   --host-timeout 3s  a hard ceiling per host, so one black hole cannot
+#        stall the whole sweep the way the VPN sweep used to
+#   -oG -  "grepable" output on stdout, one line per host that answered:
+#            Host: 10.23.184.62 ()	Status: Up
+#          This is the list of hosts that answered IN THIS SWEEP.
+sweep_once() {
+    local t start up n ip mac match oui
+    for t in $TARGETS; do
+        printf '    sweeping %-20s ' "$t"
+        start=$SECONDS
+        up="$(nmap -sn -n -T4 --host-timeout 3s -oG - "$t" 2>/dev/null \
+                | awk '/Status: Up/{print $2}')" || true
+        n="$(echo "$up" | awk 'NF' | wc -l)"
+        echo "($((SECONDS - start))s, $n up)"
 
-if [ -z "$TARGETS" ]; then
-    if try_cached; then
-        TARGETS=""            # cache hit — no scanning needed at all
-    else
+        for ip in $up; do
+            mac="$(neigh_mac "$ip")"
+            if [ -z "$mac" ]; then
+                # nmap run as root talks ARP through a raw socket and leaves
+                # the kernel's cache empty. One ping fills it.
+                ping -c1 -W1 -n "$ip" >/dev/null 2>&1 || true
+                mac="$(neigh_mac "$ip")"
+            fi
+            # Our own address lands here: a host has no ARP entry for itself.
+            [ -n "$mac" ] || continue
+
+            match=""
+            if [ -n "$BOARD_MAC" ]; then
+                [ "$mac" = "$BOARD_MAC" ] && match="exact MAC"
+            else
+                for oui in $RPI_OUIS; do
+                    # Prefix match with no ":" appended, because the prefixes
+                    # are 24, 28 or 36 bits wide. See RPI_OUIS at the top.
+                    case "$mac" in "$oui"*) match="Raspberry Pi prefix $oui" ;; esac
+                done
+            fi
+            [ -n "$match" ] || continue
+
+            FOUND="$FOUND $ip"
+            echo "    $ip  $mac  ($match)"
+        done
+    done
+    FOUND="${FOUND# }"
+}
+
+FOUND=""
+EXPLICIT=no
+[ -z "$TARGETS" ] || EXPLICIT=yes
+ROUND=0
+
+# Explicit targets mean "scan THIS", so the cache is not consulted at all.
+if [ "$EXPLICIT" = no ] && try_cached; then
+    :                         # cache hit — no scanning needed at all
+else
+    if [ "$EXPLICIT" = no ]; then
         echo
         TARGET_LINES="$(build_targets)"
         TARGETS="$(echo "$TARGET_LINES" | awk 'NF{print $1}' | sort -u)"
@@ -301,10 +429,7 @@ if [ -z "$TARGETS" ]; then
             exit 1
         }
     fi
-fi
 
-# --- Scan --------------------------------------------------------------------
-if [ -z "$FOUND" ]; then
     if [ -n "$BOARD_MAC" ]; then
         echo ">>> Looking for MAC $BOARD_MAC (from $NETWORK_ENV)"
     else
@@ -313,56 +438,32 @@ if [ -z "$FOUND" ]; then
         echo "      on the board:  ip link show wlan0"
         echo "      then add to $NETWORK_ENV:  BOARD_MAC=b8:27:eb:..."
     fi
-    echo
+    echo "    (sweeping until found, for up to ${TIMEOUT}s — Ctrl-C to stop)"
 
-    # One nmap per target, announced and timed, so a slow sweep is visibly
-    # slow rather than silently hung.
-    #
-    #   -sn  ping sweep only, no port scan — enough to populate ARP
-    #   -n   never do reverse DNS. On a hotspot there is no resolver worth
-    #        waiting for, and this alone is the difference between 3 s and 30 s
-    #   -T4  aggressive timing; fine on a local wire, and the point here is
-    #        latency not stealth
-    #   --host-timeout 3s  a hard ceiling per host, so one black hole cannot
-    #        stall the whole sweep the way the VPN sweep used to
-    for t in $TARGETS; do
-        printf '    sweeping %-20s ' "$t"
-        start=$SECONDS
-        nmap -sn -n -T4 --host-timeout 3s "$t" >/dev/null 2>&1 || true
-        echo "($((SECONDS - start))s)"
-    done
-    echo
-
-    # --- Read the ARP cache the sweep just filled ----------------------------
-    # `ip neigh` prints e.g.
-    #   192.168.43.5 dev wlp2s0 lladdr b8:27:eb:12:34:56 REACHABLE
-    # FAILED entries are addresses we probed and nothing answered; skip them.
-    while read -r ip _dev iface _lladdr mac state; do
-        [ "$_lladdr" = "lladdr" ] || continue
-        [ "$state" != "FAILED" ] || continue
-        mac="$(echo "$mac" | tr 'A-Z' 'a-z')"
-
-        match=""
-        if [ -n "$BOARD_MAC" ]; then
-            [ "$mac" = "$BOARD_MAC" ] && match="exact MAC"
-        else
-            for oui in $RPI_OUIS; do
-                # Prefix match with no ":" appended, because the prefixes are
-                # 24, 28 or 36 bits wide. See RPI_OUIS at the top.
-                case "$mac" in "$oui"*) match="Raspberry Pi prefix $oui" ;; esac
-            done
+    # ---------------------------------------------------------------------------
+    # STEP 3 — sweep until found or out of time
+    # ---------------------------------------------------------------------------
+    # SECONDS is bash's own counter since the script started. The deadline is
+    # checked after each sweep, so the last sweep may run a little past it
+    # rather than being cut off half-way.
+    DEADLINE=$((SECONDS + TIMEOUT))
+    while :; do
+        ROUND=$((ROUND + 1))
+        echo
+        echo ">>> sweep $ROUND  (${SECONDS}s elapsed)"
+        sweep_once
+        [ -z "$FOUND" ] || break
+        [ "$SECONDS" -lt "$DEADLINE" ] || break
+        sleep "$RETRY_GAP"
+        if [ "$EXPLICIT" = no ] && try_cached quiet; then
+            break
         fi
-        [ -n "$match" ] || continue
-
-        FOUND="$FOUND $ip"
-        echo "    $ip  $mac  on $iface  ($match)"
-    done < <(ip -4 neigh show 2>/dev/null)
-    FOUND="${FOUND# }"
+    done
 fi
 
 echo
 if [ -z "$FOUND" ]; then
-    echo ">>> Nothing matched."
+    echo ">>> Nothing matched after $ROUND sweep(s) in ${SECONDS}s."
     echo
     echo "    Falling back to 'anything with ssh open' — the board is in here"
     echo "    somewhere if it associated at all:"
@@ -380,8 +481,14 @@ if [ -z "$FOUND" ]; then
     echo "      3. the hotspot SSID and PSK really are in the card's"
     echo "         /etc/wpa_supplicant/wpa_supplicant-wlan0.conf"
     echo "      4. the phone's own 'connected devices' list — if the board is"
-    echo "         listed there, it associated and this is a scanning problem,"
-    echo "         most likely client isolation on the hotspot"
+    echo "         listed there, it associated and this is a scanning problem."
+    echo "         Missed by EVERY sweep of a run points at client isolation on"
+    echo "         the hotspot. A single miss would not: one sweep missed a board"
+    echo "         that was online 2 times in 9 on a phone hotspot (2026-11-06),"
+    echo "         which is why this script retries."
+    echo
+    echo "    Board powered on only just now? It needs ~20 s to get an"
+    echo "    address. Give it longer:  $0 --timeout 120"
     exit 1
 fi
 
