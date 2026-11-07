@@ -52,6 +52,7 @@ IMAGE_INSTALL = "\
     ${LOGGER_WIFI} \
     rpi0-network \
     systemd-analyze \
+    journald-size-cap \
     "
 
 # --- The USB serial drivers -------------------------------------------------
