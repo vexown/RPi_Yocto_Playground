@@ -20,12 +20,15 @@
 #
 # The partition layout depends on the target.
 #
-# rpi0 uses meta-raspberrypi's stock sdimage-raspberrypi.wks: just two
-# partitions, p1 (FAT32 boot) and p2 (ext4 root). Single-slot appliance,
-# reflashed rather than updated. NOTE that a rootfs built for it still
-# needs the fstab fix in meta-playground/recipes-core/base-files — the
-# rauc layer's fstab demands p5 and p6 across the whole ":rpi" family and
-# would strand this two-partition card in an emergency shell.
+# rpi0: rpi0-logger-image uses meta-playground/wic/rpi0-logger.wks (session
+# 28): p1 (FAT32 boot), p2 (ext4 root) and p3 (ext4 captures, 64 MB in the
+# image, grown to the end of the card on first boot). Other rpi0 images use
+# meta-raspberrypi's stock two-partition layout. Single-slot appliance,
+# reflashed rather than updated, and a reflash WIPES the captures on p3.
+# NOTE that a rootfs built for it still needs the fstab fix in
+# meta-playground/recipes-core/base-files — the rauc layer's fstab demands
+# p5 and p6 across the whole ":rpi" family and would strand this card in an
+# emergency shell.
 #
 # rpi5: session 11 changed the layout (WKS_FILE in local.conf). It used to
 # be two partitions; the A/B update scheme needs five:

@@ -1,0 +1,182 @@
+# short-description: Pi Zero W serial logger: boot, rootfs, and a captures partition
+# long-description: meta-raspberrypi's sdimage-raspberrypi.wks plus a third
+# partition that holds the logger's captures and grows to fill the card on
+# first boot.
+#
+# ---------------------------------------------------------------------------
+# WHAT THIS FILE IS
+# ---------------------------------------------------------------------------
+# wic (poky/scripts/wic) is the OpenEmbedded Image Creator: "oeic", with the
+# hard-to-say "oe" swapped for a "w", per poky's own dev-manual/wic.rst. It
+# is the build step
+# that turns the build's PIECES (the root filesystem directory, the kernel,
+# device trees, the Pi firmware) into ONE disk image you can write to a
+# card. BitBake runs it because meta-raspberrypi's rpi-base.inc lists
+# "wic.bz2" in IMAGE_FSTYPES; the result is
+# tmp/deploy/images/raspberrypi0-wifi/rpi0-logger-image-*.rootfs.wic.bz2,
+# which flash-sd.sh decompresses and writes to the card byte for byte.
+# Think of it as a linker script plus objcopy for a flash image.
+#
+# A .wks ("wic kickstart") file is the layout wic follows: one `part` line
+# per partition, in order. For each, wic creates the filesystem as a
+# separate file, fills it if there is a --source, then writes the partition
+# table (MBR here, see below) and copies each partition into the image at
+# its offset. The image recipe picks this file with
+# WKS_FILE = "rpi0-logger.wks" (rpi0-logger-image.bb). Before session 28 it
+# used meta-raspberrypi's stock sdimage-raspberrypi.wks.
+#
+# The first two `part` lines are meta-raspberrypi's stock layout, copied
+# unchanged. The third is ours.
+#
+# ---------------------------------------------------------------------------
+# WHY A THIRD PARTITION  (session 28)
+# ---------------------------------------------------------------------------
+# The logger's own limits stop the LOGGER filling the disk. A separate
+# partition contains the damage when something else misbehaves: a full
+# captures partition stops logging, a full rootfs stops the board.
+#
+# Why only 64 MB here, when the plan is "the whole card": the build does not
+# know which card the image will land on, and flash-sd.sh writes and then
+# reads back every byte of the image. A 14 GB partition built in here would
+# mean ~14 GB written and verified on every reflash. So the image carries a
+# small partition, and on the first boot grow-captures.service extends it to
+# the end of whatever card it is on, then systemd-growfs grows the
+# filesystem inside to match (x-systemd.growfs in fstab). See
+# recipes-core/captures-partition.
+#
+# It must be the LAST partition: a partition can only grow into free space
+# directly after it.
+#
+# ---------------------------------------------------------------------------
+# MBR, NOT GPT
+# ---------------------------------------------------------------------------
+# The partition table is the small structure at the start of the disk that
+# lists where each partition starts and how long it is. Two formats exist:
+#
+#   MBR  (1983) all of it in sector 0: four 16-byte entries, each holding a
+#        type byte, a 32-bit start sector and a 32-bit length. Max 4
+#        partitions, max 2 TiB, one copy, no checksum.
+#   GPT  (2000s, UEFI PCs) 128 entries, 64-bit sizes, CRC32 checksums, a
+#        backup copy at the end of the disk, a unique ID per partition.
+#
+# This card is MBR because the Zero W's boot ROM and bootcode.bin only read
+# MBR (the Pi 4 and 5 boot from GPT too; the Zero W does not). wic uses MBR
+# unless a .wks says `bootloader --ptable gpt`, and this one does not.
+#
+# It is also why systemd-repart, systemd's standard "create or grow
+# partitions on first boot" tool, is not used: it finds partitions by their
+# GPT type IDs, which MBR does not have.
+#
+# ---------------------------------------------------------------------------
+# THE `part` LINES, ARGUMENT BY ARGUMENT
+# ---------------------------------------------------------------------------
+#   part /boot, part /
+#                 The mount point. wic uses it for two things: to write
+#                 fstab entries (switched off for this image by
+#                 --no-fstab-update in rpi0-logger-image.bb; our own fstab
+#                 is authoritative), and, with --source rootfs, to know which
+#                 part of the built root filesystem goes in this partition.
+#                 The captures line has none: it gets no content from the
+#                 build, and fstab mounts it.
+#   --source bootimg-partition
+#                 A wic plugin that fills the partition with the files listed
+#                 in IMAGE_BOOT_FILES: the Pi firmware (bootcode.bin,
+#                 start.elf), config.txt, cmdline.txt, the kernel and the
+#                 device trees.
+#   --source rootfs
+#                 A wic plugin that copies in the root filesystem the build
+#                 just assembled.
+#   (no --source) An empty partition, formatted with --fstype and nothing
+#                 else. That is the captures partition.
+#   --ondisk mmcblk0
+#                 Which disk the partition belongs to. wic can build images
+#                 for several disks at once; there is only one here.
+#                 mmcblk0 is the Pi's SD card slot.
+#   --fstype=vfat / --fstype=ext4
+#                 The filesystem to create, which also picks the MBR type
+#                 byte: FAT32 for the firmware partition (the boot ROM can
+#                 only read FAT), ext4 for the Linux ones.
+#   --label boot / root / captures
+#                 The filesystem's volume name. Shows up in `lsblk -f` and
+#                 /dev/disk/by-label/. Our fstab names partitions by device
+#                 path instead; the labels are for humans.
+#   --active      Sets the "bootable" flag in this MBR entry. Kept from the
+#                 stock layout; the Pi firmware finds the FAT partition
+#                 without it.
+#   --align 4096  Start the partition on a multiple of 4096 KiB (4 MiB). SD
+#                 cards erase and rewrite flash in large internal blocks,
+#                 commonly 4 MiB. A partition that starts mid-block makes
+#                 many writes straddle two blocks, which costs speed and
+#                 wear.
+#   --size 100 / --size 64
+#                 The partition size, in MiB. The rootfs line has no --size:
+#                 wic sizes it from the content times IMAGE_OVERHEAD_FACTOR
+#                 (1.3), which is why it is only ~109 MiB.
+#   --mkfs-extraopts "..."
+#                 Extra options for mkfs.ext4. They REPLACE wic's default for
+#                 an empty ext4 partition, which is "-i 8192"
+#                 (poky/scripts/lib/wic/partition.py). wic adds -F, -L and
+#                 -U itself.
+#
+# ---------------------------------------------------------------------------
+# THE mkfs.ext4 OPTIONS FOR CAPTURES
+# ---------------------------------------------------------------------------
+# Why they matter: the filesystem is CREATED at 64 MB but LIVES at the size
+# of the card, and some properties are fixed at creation. Measured 2026-11-07
+# with the build's own mke2fs 1.47.0 and its mke2fs.conf, creating at 64 MB
+# and growing to this 14.4 GiB card:
+#
+#                          wic default ("-i 8192")   ours
+#     block size           1 KiB                     4 KiB
+#     inodes (max files)   1,890,304 (~460 MiB)      29,696 (~7 MiB)
+#     reserved for root    5%  (~738 MiB)            0
+#
+# Both can grow while mounted to 1024x the creation size (see "HOW FAR IT
+# CAN GROW" below).
+#
+#   -b 4096       4 KiB blocks. mke2fs picks 1 KiB for anything under 512 MB
+#                 (its "small" profile), and growing never changes the block
+#                 size. 1 KiB blocks on a 14 GB partition mean four times as
+#                 much bookkeeping for every file.
+#   -i 262144     One inode per 256 KiB of the filesystem at creation. Every
+#                 file uses one inode, so this is the maximum number of
+#                 files. The count per 128 MiB block group is fixed at
+#                 creation and every new group gets the same, so it scales
+#                 with the card: ~30,000 on 16 GB. Captures are up to 4 MB
+#                 each, but a flaky cable makes many tiny ones (seen
+#                 2026-11-04), and running out of inodes stops the logger
+#                 with the disk still empty. 7 MiB is cheap insurance.
+#                 (-T largefile would give 7,424, a limit a bad cable
+#                 could actually reach.)
+#   -m 0          No root-reserved blocks. ext4 normally keeps 5% that only
+#                 root can use, so a system disk filled by users still lets
+#                 root log in. Here the only writer IS root, so the reserve
+#                 protects nothing, and the logger's LOGGER_KEEP_FREE (10%)
+#                 is the headroom that applies.
+#
+# ---------------------------------------------------------------------------
+# HOW FAR IT CAN GROW  (and an option that does NOT work here)
+# ---------------------------------------------------------------------------
+# Growing a MOUNTED ext4 needs spare room for its bookkeeping (more block
+# group descriptors), set aside when the filesystem is created: "Reserved
+# GDT blocks" in dumpe2fs. mke2fs reserves enough for 1024x the creation
+# size by default. From 64 MB that is 64 GiB, so any card up to 64 GB is
+# covered. The built image has 7 reserved blocks; with the one in use that
+# is 8 descriptor blocks x 64 groups per block x 128 MiB per group = 64 GiB.
+#
+# `-E resize=<blocks>` is mke2fs's option to reserve for more. It does
+# nothing here: for reproducible builds wic appends its own
+# `-E hash_seed=...` to every ext4 it makes (poky/scripts/lib/wic/
+# partition.py, get_hash_seed_ext4), and mke2fs keeps only the LAST -E.
+# Found 2026-11-07: the image came out with 7 reserved blocks, not the 31
+# asked for, and the host reproduces it exactly (-E resize=... alone: 31;
+# followed by a second -E: 7). So it is not in the options below.
+#
+# Past 64 GiB the kernel's ext4 driver can still grow a mounted filesystem
+# by switching to a different descriptor layout (meta_bg), but that is
+# untested here. To raise the guaranteed limit instead, make the partition
+# bigger: --size 128 gives 128 GiB, for 64 MB more written per flash.
+
+part /boot --source bootimg-partition --ondisk mmcblk0 --fstype=vfat --label boot --active --align 4096 --size 100
+part / --source rootfs --ondisk mmcblk0 --fstype=ext4 --label root --align 4096
+part --ondisk mmcblk0 --fstype=ext4 --label captures --align 4096 --size 64 --mkfs-extraopts "-b 4096 -i 262144 -m 0"

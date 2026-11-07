@@ -1,0 +1,130 @@
+#!/bin/sh
+# grow-captures — extend the captures partition (mmcblk0p3) to the end of
+# the SD card. Run on every boot by grow-captures.service, BEFORE the
+# partition is checked or mounted.
+#
+# The image ships p3 at 64 MB (meta-playground/wic/rpi0-logger.wks explains
+# why). On the first boot this script moves its END to the end of the card.
+# Its START never moves, so no data moves either: of the card's MBR (the
+# partition table in sector 0), only the 4-byte "length" field of entry 3
+# changes. systemd-growfs then grows the ext4 filesystem inside to match,
+# once the partition is mounted (x-systemd.growfs in fstab).
+#
+# Every boot after the first finds nothing to do and exits in milliseconds.
+# That is deliberate: no "first boot done" marker file that could disagree
+# with reality. The partition table itself is the state.
+#
+# There are two copies of the partition table that matter, so two steps:
+#   1. sfdisk rewrites the one ON THE CARD.
+#   2. resizepart updates the KERNEL's copy, which it read at boot.
+#
+# Failure is safe: if either step fails, p3 is still a working 64 MB
+# partition, the mount still succeeds (grow-captures.service ignores this
+# script's exit status, see its ExecStart=-), and the logger still runs,
+# just with less room. The journal (journalctl -u grow-captures) says why.
+# If only step 2 fails, the next boot reads the new table from the card and
+# the filesystem grows then.
+
+# -e  stop at the first command that fails, rather than carrying on with a
+#     half-done job.
+# -u  treat using an unset variable as an error (catches typos).
+set -eu
+
+DISK=/dev/mmcblk0       # the whole SD card
+NAME=mmcblk0            # its name in /sys
+PART=3                  # the captures partition's number
+SYS=/sys/block/$NAME/${NAME}p$PART    # the kernel's view of that partition
+
+# ---------------------------------------------------------------------------
+# Step 0: is there anything to do?
+# ---------------------------------------------------------------------------
+# The kernel publishes disk and partition geometry as plain text files in
+# /sys. All three values are counts of 512-byte sectors, whatever the
+# card's real internal block size:
+#   /sys/block/mmcblk0/size           the whole card
+#   /sys/block/mmcblk0/mmcblk0p3/start  where p3 starts
+#   /sys/block/mmcblk0/mmcblk0p3/size   how long p3 is
+disk_sectors=$(cat /sys/block/$NAME/size)
+start=$(cat "$SYS/start")
+size=$(cat "$SYS/size")
+end=$((start + size))
+
+# "Already fills the card" means ending within 8 MiB of the end. The gap is
+# never exactly zero: sfdisk rounds the end of a partition to an alignment
+# boundary, and cards often have a few odd sectors past the last one.
+# 8 MiB in sectors: 8 * 1024 * 1024 bytes / 512 bytes per sector.
+slack=$((8 * 1024 * 1024 / 512))
+if [ $((disk_sectors - end)) -le "$slack" ]; then
+    # 2048 sectors of 512 bytes = 1 MiB, hence "/ 2048" for MiB.
+    echo "captures partition ${NAME}p$PART already reaches the end of the card ($((size / 2048)) MiB)"
+    exit 0
+fi
+
+echo "growing ${NAME}p$PART from $((size / 2048)) MiB to the end of the card ($(((disk_sectors - start) / 2048)) MiB)"
+
+# ---------------------------------------------------------------------------
+# Step 1: rewrite partition 3's entry on the card
+# ---------------------------------------------------------------------------
+# sfdisk is a scriptable partition editor: it reads partition descriptions
+# from stdin instead of asking questions.
+#
+#   echo ", +"
+#       One partition description, in sfdisk's "start, size" format:
+#         (empty) start  -> keep the current start
+#         +       size   -> as large as possible, up to the end of the disk
+#   -N 3
+#       Apply that description to partition 3 only. Partitions 1 and 2
+#       are not touched.
+#   --no-reread
+#       Skip sfdisk's "is this disk in use?" check and its re-read of the
+#       table afterwards. The disk IS in use (the rootfs on p2 is mounted),
+#       and sfdisk refuses to edit an in-use disk without this flag. That is
+#       safe here because we only change p3, which nothing has open yet.
+#   --no-tell-kernel
+#       Do not try to update the kernel's copy of the table. The kernel would
+#       refuse anyway, for the same "in use" reason; step 2 does it
+#       properly, for p3 only.
+#   --wipe never
+#   --wipe-partitions never
+#       sfdisk can erase filesystem signatures it finds on the disk and in
+#       partitions it creates. On a partition we are only RESIZING, that
+#       would destroy the ext4 inside. Never.
+#   /dev/mmcblk0
+#       The disk whose partition table to edit (the whole card, not p3).
+echo ", +" | sfdisk --no-reread --no-tell-kernel \
+                    --wipe never --wipe-partitions never \
+                    -N "$PART" "$DISK"
+
+# ---------------------------------------------------------------------------
+# Step 2: tell the kernel about partition 3's new size
+# ---------------------------------------------------------------------------
+# The kernel read the partition table once, at boot, and will not re-read a
+# whole disk while any partition on it is mounted (the rootfs on p2 is). It
+# WILL change the size of one partition in place, through the BLKPG
+# "resize partition" request: same start, new length. The device stays
+# where it is; only its size changes.
+#
+# First, the new length, read back from the table sfdisk just wrote:
+#   partx --show   list partitions as found ON THE CARD (reads only)
+#   -g             no heading line
+#   -o SECTORS     print just the length, in 512-byte sectors
+#   -n 3           only partition 3
+new_size=$(partx --show -g -o SECTORS -n "$PART" "$DISK")
+new_size=$(echo $new_size)    # drop the padding partx puts around numbers
+
+# Then the resize itself:
+#   resizepart DISK PARTITION LENGTH
+#   LENGTH is in 512-byte sectors; the start is kept as it is.
+#
+# Why not `partx --update`, which looks like the obvious tool: it first
+# DELETES the partition from the kernel and only falls back to a resize if
+# the partition is busy. p3 is not busy yet, so it was deleted and re-added.
+# For a moment /dev/mmcblk0p3 did not exist, and systemd stopped everything
+# tied to it: the fsck, the mount and the logger's start request were all
+# cancelled, and the logger stayed down. Found on hardware 2026-11-07 with a
+# debug-logged first boot (udev: "mmcblk0p3: ... ACTION=remove", then
+# systemd: "dev-mmcblk0p3.device: Changed plugged -> dead"). A resize sends
+# no remove/add at all.
+resizepart "$DISK" "$PART" "$new_size"
+
+echo "kernel now sees ${NAME}p$PART as $(($(cat "$SYS/size") / 2048)) MiB; the filesystem is grown when it is mounted"

@@ -52,6 +52,7 @@ IMAGE_INSTALL = "\
     ${LOGGER_WIFI} \
     rpi0-network \
     systemd-analyze \
+    captures-partition \
     journald-size-cap \
     "
 
@@ -310,8 +311,30 @@ BAD_RECOMMENDATIONS += "busybox-syslog"
 # --no-fstab-update in ksparser.py — that flag exists but the loop above
 # never consults it in scarthgap. image_types_wic.bbclass:73 passes
 # WIC_CREATE_EXTRA_ARGS straight through to `wic create`, so no custom
-# .wks is needed.
+# .wks was needed FOR THIS. (Session 28 added one anyway, for a different
+# reason: see WKS_FILE below. The flag still applies to it.)
 WIC_CREATE_EXTRA_ARGS += " --no-fstab-update"
+
+# ---------------------------------------------------------------------------
+# THE CARD LAYOUT  (session 28)
+# ---------------------------------------------------------------------------
+# meta-raspberrypi's stock sdimage-raspberrypi.wks plus a third partition for
+# the logger's captures, which grows to fill the card on first boot. The
+# reasoning is in the .wks itself: meta-playground/wic/rpi0-logger.wks.
+#
+# Set HERE, in the image recipe, not in local.conf: the layout belongs to
+# this product, and a local.conf setting would also reshape every other
+# image built in build-rpi0 (core-image-minimal, for one).
+#
+# One thing does leak to those other images: the fstab is per MACHINE
+# (base-files/files/raspberrypi0-wifi/), so it names p3 for them too. That
+# is harmless by construction: the line is "nofail", so on a card without
+# p3 the mount gives up after the device timeout and boot carries on
+# without waiting for it.
+#
+# The first-boot grow step it relies on, captures-partition (sfdisk +
+# resizepart), is in IMAGE_INSTALL above.
+WKS_FILE = "rpi0-logger.wks"
 
 # ---------------------------------------------------------------------------
 # WHAT IS DELIBERATELY ABSENT, AND WHY

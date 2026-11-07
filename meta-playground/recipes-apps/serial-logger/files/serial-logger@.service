@@ -35,6 +35,19 @@ Description=USB serial logger on /dev/%i
 BindsTo=dev-%i.device
 After=dev-%i.device
 
+# Do not start until whatever is mounted at the log directory IS mounted
+# (session 28). On the Zero W that is the captures partition, mmcblk0p3.
+# Without this, an early hotplug or a failed mount would let the logger
+# write into the empty directory underneath, on the rootfs, which is the
+# exact thing a separate partition exists to prevent. If the mount fails,
+# the logger fails with "dependency failed" in the journal instead of
+# quietly filling the wrong disk.
+#
+# Takes a PATH, not a unit name: systemd works out which mount units cover
+# it. On a board where /var/log/serial-logger is just a directory on the
+# rootfs (the Pi 5), it resolves to the rootfs mounts and changes nothing.
+RequiresMountsFor=/var/log/serial-logger
+
 # The start limiter, made explicit rather than left to the defaults (5 tries
 # per 10 s). Three failures in a minute and systemd gives up until something
 # resets it — a hard backstop against ever reproducing the old crash loop.

@@ -1,0 +1,51 @@
+# grow-captures.service — extend mmcblk0p3 to the end of the card, before
+# anything else touches it. See /usr/sbin/grow-captures for what and why.
+#
+# Nothing enables this unit and it has no [Install] section. It is pulled in
+# by the captures MOUNT itself: the fstab line carries
+#     x-systemd.requires=grow-captures.service
+# so systemd's fstab generator gives the mount Requires= and After= on it.
+# The dependency is written next to the thing that depends on it, and the
+# grow cannot run unless the mount is actually wanted.
+#
+# Why not WantedBy=local-fs.target, the obvious alternative: a target waits
+# for everything it wants. If p3 were ever missing (a card flashed with some
+# other image), local-fs.target would sit out the device timeout before the
+# board finished booting. Hanging off a "nofail" mount, a missing p3 only
+# makes the mount (and the logger) wait out the device timeout; the boot
+# does not.
+
+[Unit]
+Description=Grow the captures partition to the end of the SD card
+Documentation=file:/usr/sbin/grow-captures
+
+# Runs during early boot, alongside local-fs, so none of the default
+# dependencies on sysinit.target and basic.target can apply: those come
+# AFTER local filesystems are mounted, which would be an ordering cycle.
+DefaultDependencies=no
+
+# The partition must exist before we can read or resize it.
+Requires=dev-mmcblk0p3.device
+After=dev-mmcblk0p3.device
+
+# Resize the partition while nothing has it open: before fsck checks it and
+# before it is mounted. (The mount is also ordered after us by
+# x-systemd.requires; stating it here too keeps this file self-explanatory.)
+Before=systemd-fsck@dev-mmcblk0p3.service
+Before=var-log-serial\x2dlogger.mount
+
+# Standard for an early-boot unit: stop cleanly at shutdown.
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+# Counts as "active" after exiting successfully, so the mount's Requires=
+# stays satisfied instead of seeing a dead unit.
+RemainAfterExit=yes
+# The "-" means: if the script fails, log it but still count the unit as a
+# success. Without it a failed grow would fail the mount too (the mount
+# Requires= this unit), and the logger with it, over a partition that is
+# still a perfectly usable 64 MB. Growing is an improvement, not a
+# precondition.
+ExecStart=-/usr/sbin/grow-captures

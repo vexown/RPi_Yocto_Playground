@@ -233,10 +233,12 @@ DISABLE_VC4GRAPHICS = "1"
 #                    earned its place on the Pi 5 because A/B slot selection
 #                    needs a writable environment; here, boot time is the
 #                    product requirement and nothing needs a bootloader yet.
-# WKS_FILE         — stock single-rootfs layout. No A/B on this board (yet);
-#                    Phase 6's durability answer is a READ-ONLY rootfs, which
-#                    solves the "yanked power corrupts the card" problem
-#                    without doubling the image.
+# WKS_FILE         — not set HERE. No A/B on this board (yet); Phase 6's
+#                    durability answer is a READ-ONLY rootfs, which solves
+#                    the "yanked power corrupts the card" problem without
+#                    doubling the image. The logger image does set its own
+#                    WKS_FILE (session 28: a third partition for captures),
+#                    in rpi0-logger-image.bb, so it applies to that image only.
 # IMAGE_FSTYPES    — no bare ext4 needed; there is no bundle to build.
 # RAUC_KEY_FILE /
 # RAUC_CERT_FILE /

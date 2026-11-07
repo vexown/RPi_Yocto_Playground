@@ -5,12 +5,14 @@
 # bbappend two directories up for the full story and for why a
 # machine-named directory beats a priority bump.
 #
-# The card this describes has exactly two partitions, which is what
-# meta-raspberrypi's default sdimg .wks produces:
+# The card this describes has three partitions, from
+# meta-playground/wic/rpi0-logger.wks:
 #
 #   /dev/mmcblk0p1   vfat   the firmware/boot partition (bootcode, start.elf,
 #                           config.txt, cmdline.txt, kernel.img, dtbs)
 #   /dev/mmcblk0p2   ext4   the root filesystem
+#   /dev/mmcblk0p3   ext4   the serial logger's captures, grown to the end
+#                           of the card on first boot (session 28)
 #
 # There is no /data and no /home partition, because there is no A/B layout
 # on this board. The Zero W is a single-slot device: it gets reflashed, not
@@ -58,3 +60,39 @@ tmpfs                /var/volatile        tmpfs      defaults              0  0
 # it. That belongs with the read-only-rootfs work, where the same argument
 # gets made about / — one decision, made once, with numbers.
 /dev/mmcblk0p1       /boot                vfat       defaults,nofail       0  0
+
+# The captures partition, mounted exactly where the logger already writes.
+# The logger's unit, its LogsDirectory= and ProtectSystem=strict all keep
+# working unchanged: the PATH did not move, only what is behind it. (Same
+# reasoning as VOLATILE_LOG_DIR in local.conf.rpi0.)
+#
+# The options, one by one:
+#   noatime    Do not write an access time every time a capture is READ.
+#              Copying a capture off the board should not cost SD writes.
+#   nofail     Same lesson as /boot above. A broken or missing captures
+#              partition must stop the LOGGER, never the BOARD: boot carries
+#              on and you can still ssh in to find out why. The logger's unit
+#              has RequiresMountsFor= on this path, so it will not start
+#              without the mount, rather than quietly writing into the empty
+#              directory underneath on the rootfs, which is the exact failure
+#              this partition exists to prevent.
+#   (no x-systemd.device-timeout)
+#              How long to wait for /dev/mmcblk0p3 to appear stays at the
+#              default 90 s. It was 10 s at first, on the theory that it
+#              should not hold up the boot. It never could: with nofail the
+#              boot does not wait for this mount at all. All a short timeout
+#              did was give up on a partition that was merely slow: the first
+#              boot took 8.7 s to see p3, and a debug-logged one took 11 s
+#              and lost the mount (2026-11-07).
+#   x-systemd.requires=grow-captures.service
+#              Grow the partition to the end of the card before mounting it.
+#              The fstab generator turns this into Requires= + After= on the
+#              mount unit. See recipes-core/captures-partition.
+#   x-systemd.growfs
+#              After mounting, grow the ext4 filesystem to fill the
+#              partition (systemd-growfs, done while mounted). A no-op once
+#              it already fills it, which is every boot after the first.
+#   pass 2     fsck it at boot, after the rootfs (pass 1). With ext4's
+#              journal this normally just replays the journal after a power
+#              cut, which is quick.
+/dev/mmcblk0p3       /var/log/serial-logger  ext4  defaults,noatime,nofail,x-systemd.requires=grow-captures.service,x-systemd.growfs  0  2
