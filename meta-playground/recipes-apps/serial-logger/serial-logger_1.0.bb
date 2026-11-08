@@ -21,6 +21,7 @@ SRC_URI = "file://serial-logger.c \
            file://serial-logger@.service \
            file://99-serial-logger.rules \
            file://serial-logger.default \
+           file://capctl \
            "
 
 # A lone file:// unpacks straight into ${WORKDIR} on scarthgap, so S points
@@ -64,6 +65,11 @@ do_compile() {
 do_install() {
     install -d ${D}${bindir}
     install -m 0755 ${B}/serial-logger ${D}${bindir}/serial-logger
+
+    # capctl, the operator's side of the same product: a shell script, so
+    # it is installed as-is, not compiled. Run it with no arguments for
+    # its menu, or `capctl help` for the subcommands.
+    install -m 0755 ${S}/capctl ${D}${bindir}/capctl
 
     # The unit goes in the VENDOR directory (/usr/lib/systemd/system), not
     # /etc/systemd/system. That distinction is a real one: /etc is the

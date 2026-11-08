@@ -1,0 +1,457 @@
+#!/bin/sh
+# capctl — look after the serial logger's captures, on the board itself.
+#
+#   capctl                         the menu (everything below, by number)
+#   capctl status                  running loggers, their files, free space
+#   capctl list [DEV]              captures, oldest first, size and last write
+#   capctl new [DEV]               close the current file, start a new one
+#   capctl label LABEL [DEV]       same, then add LABEL to the closed file's name
+#   capctl follow [DEV]            show data as it arrives (Ctrl-C stops)
+#   capctl grep TEXT [DEV]         same, only lines containing TEXT
+#   capctl pos [DEV]               the current file and its size right now
+#   capctl slice FILE START END [OUT]
+#                                  copy bytes START..END of FILE into OUT
+#
+# DEV is the serial device the logger instance is named after: ttyACM0,
+# ttyUSB0. Leave it out when only one logger is running.
+#
+# WHY A MENU, AND WHY NOT ONLY A MENU
+# The menu is for the operator at the bench who does not want to remember
+# that "start a new file" is `systemctl kill -s HUP serial-logger@ttyACM0`.
+# But every menu entry is also a subcommand, and the subcommands are thin
+# wrappers over standard tools that work without this script. A UI that is
+# the only way to reach a capability is a UI you can get locked out of.
+#
+# THE BYTE-RANGE WORKFLOW (pos, slice, and the menu's "window")
+# Note the current file's size before and after something interesting
+# happens on the device, then copy exactly those bytes out. Exact, and
+# nothing keeps running in between: much better than watching a live
+# stream and trying to hit Ctrl-C at the right moment.
+#
+# Read-only on the captures except for: `new` and `label` (rotate via the
+# logger and rename the file it just closed), and `slice`, which writes a
+# NEW file under slices/. Nothing here ever deletes a capture; the logger's
+# own limits do that.
+#
+# Written for BusyBox ash, which is the shell on this board. Two gaps in
+# this BusyBox shape the code: `head -c` is not built in (so slicing uses
+# dd), and dd has no byte-offset flags (so slice does it in three parts).
+
+set -u
+
+UNIT_PREFIX=serial-logger@
+DEFAULTS=/etc/default/serial-logger
+STATE_DIR=/run/capctl       # RAM: window marks, which do not outlive a boot
+
+# ---------------------------------------------------------------------------
+# Where the captures are
+# ---------------------------------------------------------------------------
+# Same source of truth as the logger: LOGGER_DIR from its defaults file if
+# set there, otherwise the unit's built-in default.
+#   sed -n 's/^LOGGER_DIR=//p'   print only the value of an uncommented line
+#   tail -n 1                    the last one wins, as in systemd
+#   tr -d '"'"'"                 drop quotes, which systemd also strips
+LOGDIR=$(sed -n 's/^LOGGER_DIR=//p' "$DEFAULTS" 2>/dev/null | tail -n 1 | tr -d "\"'")
+[ -n "$LOGDIR" ] || LOGDIR=/var/log/serial-logger
+SLICE_DIR=$LOGDIR/slices
+
+die() { echo "capctl: $*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# Which loggers are running
+# ---------------------------------------------------------------------------
+# One per device, started by udev. Prints device names, one per line.
+#   --plain --no-legend   no tree glyphs, no header or footer: just rows
+#   --state=running       only instances that are actually up
+#   awk '{print $1}'      the unit name, first column
+#   sed                   serial-logger@ttyACM0.service -> ttyACM0
+running_devs() {
+    systemctl list-units --plain --no-legend --state=running "${UNIT_PREFIX}*" \
+        | awk '{print $1}' \
+        | sed -e "s/^${UNIT_PREFIX}//" -e 's/\.service$//'
+}
+
+# Pick the device to act on: the one given, or the only one running.
+# Sets DEV, or exits with a message saying why it could not.
+pick_dev() {
+    if [ -n "${1:-}" ]; then
+        DEV=$1
+        return
+    fi
+    set -- $(running_devs)
+    case $# in
+        0) die "no logger is running (is the adapter plugged in?)" ;;
+        1) DEV=$1 ;;
+        *) die "several loggers are running ($*); say which one" ;;
+    esac
+}
+
+# The file a logger is writing to right now. The logger itself knows, so ask
+# the kernel what that process has open instead of guessing from names:
+#   systemctl show -p MainPID --value   the logger's process ID
+#   /proc/PID/fd/*                      its open files, as symlinks
+#   readlink                            where each one points
+# Prints the path, or nothing if the instance is not running.
+current_file() {
+    pid=$(systemctl show -p MainPID --value "${UNIT_PREFIX}$1.service" 2>/dev/null)
+    [ -n "$pid" ] && [ "$pid" != 0 ] || return 0
+    for fd in /proc/"$pid"/fd/*; do
+        target=$(readlink "$fd" 2>/dev/null) || continue
+        case $target in
+            "$LOGDIR"/*.log) echo "$target"; return 0 ;;
+        esac
+    done
+}
+
+# A file's size in bytes. stat -c %s is one system call; no reading.
+size_of() { stat -c %s "$1"; }
+
+# 1234567 -> "1.2 MB". Decimal units, as df -h and the logger's limits use.
+human() {
+    awk -v b="$1" 'BEGIN {
+        if (b < 1000)        printf "%d B\n", b
+        else if (b < 1e6)    printf "%.1f kB\n", b / 1e3
+        else if (b < 1e9)    printf "%.1f MB\n", b / 1e6
+        else                 printf "%.1f GB\n", b / 1e9 }'
+}
+
+# ---------------------------------------------------------------------------
+# status
+# ---------------------------------------------------------------------------
+cmd_status() {
+    devs=$(running_devs)
+    if [ -z "$devs" ]; then
+        echo "no logger running"
+    fi
+    for d in $devs; do
+        unit=${UNIT_PREFIX}$d.service
+        # ActiveEnterTimestamp: when systemd last saw this unit start.
+        since=$(systemctl show -p ActiveEnterTimestamp --value "$unit")
+        f=$(current_file "$d")
+        echo "$d   running since $since"
+        if [ -n "$f" ]; then
+            echo "      writing  $(basename "$f")   $(human "$(size_of "$f")")"
+        else
+            echo "      writing  (no open capture found)"
+        fi
+    done
+    echo
+    # -h human-readable sizes, for the filesystem holding the captures.
+    df -h "$LOGDIR"
+}
+
+# ---------------------------------------------------------------------------
+# list
+# ---------------------------------------------------------------------------
+# Sorted by LAST WRITE, not by name. Names sort wrongly in two cases: a file
+# started in the same second as another gets "-1" appended, which sorts
+# BEFORE the original ('-' < '.'), and a file named under a wrong clock has
+# a meaningless date in it.
+#   stat -c '%Y %s %n'   last-write time (seconds since 1970), size, path
+#   sort -n              oldest first, so the newest is next to the prompt
+# The awk prints the time in UTC with a "Z", like the file names. TZ=UTC0
+# makes that true wherever this runs; on the board, which has no time zone
+# data, local time is UTC anyway.
+cmd_list() {
+    pattern="session_${1:-*}_*.log"
+    cur=""
+    for d in $(running_devs); do
+        cur="$cur $(current_file "$d")"
+    done
+    set -- "$LOGDIR"/$pattern
+    if [ ! -e "$1" ]; then
+        echo "no captures in $LOGDIR"
+        return
+    fi
+    stat -c '%Y %s %n' "$@" | sort -n | TZ=UTC0 awk -v cur="$cur" '
+        BEGIN { n = split(cur, c, " "); for (i = 1; i <= n; i++) open_[c[i]] = 1 }
+        {
+            path = $3; name = path; sub(/.*\//, "", name)
+            mark = (path in open_) ? "*" : " "
+            printf "%s %s  %10d  %s\n", mark, strftime("%Y-%m-%d %H:%M:%SZ", $1), $2, name
+            files++; bytes += $2
+        }
+        END {
+            printf "\n%d files, %d bytes.  * = being written now.  Time = last write.\n", files, bytes
+        }'
+    if [ -d "$SLICE_DIR" ]; then
+        echo "slices: $(ls "$SLICE_DIR" | wc -l) in $SLICE_DIR"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# new, label
+# ---------------------------------------------------------------------------
+# Rotation is the logger's own job: SIGHUP makes it close the current file
+# and open a fresh one (serial-logger.c, comment 6). This only sends it.
+#   systemctl kill -s HUP   deliver SIGHUP to the unit's processes
+#   --kill-who=main         to the logger itself, nothing else in the unit
+# Then wait for the open file to change, so we can report both names.
+# Prints the path of the file that was closed.
+rotate() {
+    old=$(current_file "$1")
+    [ -n "$old" ] || die "$1: no logger writing a capture"
+    systemctl kill -s HUP --kill-who=main "${UNIT_PREFIX}$1.service" \
+        || die "$1: could not signal the logger"
+    i=0
+    while [ $i -lt 20 ]; do         # up to 20 x 0.1 s
+        new=$(current_file "$1")
+        if [ -n "$new" ] && [ "$new" != "$old" ]; then
+            echo "$old"
+            return 0
+        fi
+        sleep 0.1
+        i=$((i + 1))
+    done
+    die "$1: the logger did not start a new file within 2 s (journalctl -u ${UNIT_PREFIX}$1)"
+}
+
+cmd_new() {
+    pick_dev "${1:-}"
+    old=$(rotate "$DEV") || exit 1
+    echo "closed   $(basename "$old")   $(human "$(size_of "$old")")"
+    echo "writing  $(basename "$(current_file "$DEV")")"
+}
+
+# Renaming the file being WRITTEN would be unsafe: the logger still prunes
+# by name and would no longer recognise its own current file. So label
+# rotates first and renames the file it just closed, which nothing has open.
+# The name keeps its "session_DEV_" start, so the logger's limits still
+# apply to it; a label marks a capture, it does not protect it.
+cmd_label() {
+    label=${1:-}
+    [ -n "$label" ] || die "usage: capctl label LABEL [DEV]"
+    # Letters, digits, dot, dash and underscore only: the label becomes part
+    # of a file name, so no spaces, slashes or shell characters.
+    case $label in
+        *[!A-Za-z0-9._-]*) die "label may contain only A-Z a-z 0-9 . _ -" ;;
+    esac
+    pick_dev "${2:-}"
+    old=$(rotate "$DEV") || exit 1
+    labelled=${old%.log}_$label.log
+    mv "$old" "$labelled" || die "could not rename $old"
+    echo "closed   $(basename "$labelled")   $(human "$(size_of "$labelled")")"
+    echo "writing  $(basename "$(current_file "$DEV")")"
+}
+
+# ---------------------------------------------------------------------------
+# follow, grep
+# ---------------------------------------------------------------------------
+#   tail -n 20 -f FILE   the last 20 lines, then everything appended after
+# It follows the FILE, so after a rotation it goes quiet: run it again.
+# The data is shown raw, as the device sent it.
+cmd_follow() {
+    pick_dev "${1:-}"
+    f=$(current_file "$DEV")
+    [ -n "$f" ] || die "$DEV: no capture open"
+    echo "== $(basename "$f")   (Ctrl-C to stop; a new file needs a new follow)"
+    tail -n 20 -f "$f"
+}
+
+#   tail -n 0 -f    only data that arrives from now on
+#   grep -F -e TEXT only lines containing TEXT, taken literally (-F):
+#                   no regular expression, so "[Sun]" means those five
+#                   characters, not "any of S, u, n". Case-sensitive.
+cmd_grep() {
+    pat=${1:-}
+    [ -n "$pat" ] || die "usage: capctl grep TEXT [DEV]"
+    pick_dev "${2:-}"
+    f=$(current_file "$DEV")
+    [ -n "$f" ] || die "$DEV: no capture open"
+    echo "== $(basename "$f"), lines containing: $pat   (Ctrl-C to stop)"
+    tail -n 0 -f "$f" | grep -F -e "$pat"
+}
+
+# ---------------------------------------------------------------------------
+# pos, slice
+# ---------------------------------------------------------------------------
+cmd_pos() {
+    pick_dev "${1:-}"
+    f=$(current_file "$DEV")
+    [ -n "$f" ] || die "$DEV: no capture open"
+    echo "$f $(size_of "$f")"
+}
+
+# Copy bytes START (inclusive) to END (exclusive) of FILE into OUT.
+#
+# The usual tool, `tail -c +N | head -c M`, needs head -c, which this
+# BusyBox does not have. dd can do it, but only counts in blocks of bs
+# bytes, and bs=1 means one system call per byte. So: three dd runs.
+#
+#   [START ... next 4 KiB boundary)   bs=1, at most 4095 bytes
+#   [whole 4 KiB blocks ...]          bs=4096, the bulk of it, fast
+#   [last partial block ... END)      bs=1, at most 4095 bytes
+#
+# dd's arguments: if= input file, bs= block size, skip= blocks to skip in
+# the input, count= blocks to copy. Its record counts go to stderr, hence
+# 2>/dev/null. Reading straight from the file (not a pipe) matters: from a
+# file every block read is full, so the counts are exact.
+slice_copy() {
+    file=$1 start=$2 end=$3 out=$4
+    bs=4096
+    len=$((end - start))
+    head_n=$(( (bs - start % bs) % bs ))
+    [ $head_n -le $len ] || head_n=$len
+    mid_blocks=$(( (len - head_n) / bs ))
+    tail_n=$(( len - head_n - mid_blocks * bs ))
+    {
+        if [ $head_n -gt 0 ]; then
+            dd if="$file" bs=1 skip="$start" count="$head_n" 2>/dev/null
+        fi
+        if [ $mid_blocks -gt 0 ]; then
+            dd if="$file" bs=$bs skip=$(( (start + head_n) / bs )) \
+               count="$mid_blocks" 2>/dev/null
+        fi
+        if [ $tail_n -gt 0 ]; then
+            dd if="$file" bs=1 skip=$(( start + head_n + mid_blocks * bs )) \
+               count="$tail_n" 2>/dev/null
+        fi
+    } > "$out"
+}
+
+is_number() { case $1 in ''|*[!0-9]*) return 1 ;; esac; }
+
+cmd_slice() {
+    [ $# -ge 3 ] || die "usage: capctl slice FILE START END [OUT]"
+    file=$1 start=$2 end=$3
+    # A bare name means a capture in the captures directory.
+    case $file in */*) ;; *) file=$LOGDIR/$file ;; esac
+    [ -f "$file" ] || die "no such file: $file"
+    is_number "$start" && is_number "$end" || die "START and END are byte offsets"
+    size=$(size_of "$file")
+    [ "$start" -lt "$end" ] || die "START must be less than END"
+    [ "$end" -le "$size" ] || die "END $end is past the end of the file ($size bytes)"
+    if [ $# -ge 4 ]; then
+        out=$4
+    else
+        # slices/ is a subdirectory, so the logger's pruning, which only
+        # looks at session_* files directly in LOGDIR, never touches it.
+        mkdir -p "$SLICE_DIR"
+        out=$SLICE_DIR/$(basename "${file%.log}")_bytes-$start-$end.log
+    fi
+    slice_copy "$file" "$start" "$end" "$out"
+    got=$(size_of "$out")
+    [ "$got" -eq $((end - start)) ] \
+        || die "wrote $got bytes to $out, expected $((end - start))"
+    echo "$out   $got bytes"
+}
+
+# ---------------------------------------------------------------------------
+# The menu
+# ---------------------------------------------------------------------------
+# A window: remember (file, size) now, and later slice from there to the
+# file's size then. Kept in /run, per device; it does not survive a reboot.
+window_start() {
+    f=$(current_file "$DEV")
+    [ -n "$f" ] || { echo "$DEV: no capture open"; return; }
+    mkdir -p "$STATE_DIR"
+    echo "$f $(size_of "$f")" > "$STATE_DIR/window.$DEV"
+    echo "window starts at byte $(size_of "$f") of $(basename "$f")"
+}
+
+window_end() {
+    [ -f "$STATE_DIR/window.$DEV" ] || { echo "no window started for $DEV"; return; }
+    read -r wfile wstart < "$STATE_DIR/window.$DEV"
+    if [ ! -f "$wfile" ]; then
+        # Renamed by a label, or pruned by the logger, since it started.
+        echo "$(basename "$wfile") is gone since the window started; nothing saved"
+        rm -f "$STATE_DIR/window.$DEV"
+        return
+    fi
+    f=$(current_file "$DEV")
+    if [ "$f" != "$wfile" ]; then
+        # The logger rotated in between (size cap, or a new file). The
+        # window is then the rest of the old file; say so rather than
+        # guess at stitching two files together.
+        echo "note: the logger moved to a new file since the window started;"
+        echo "      saving the rest of $(basename "$wfile") only"
+    fi
+    wend=$(size_of "$wfile")
+    if [ "$wend" -le "$wstart" ]; then
+        echo "nothing arrived in the window"
+    else
+        (cmd_slice "$wfile" "$wstart" "$wend")
+    fi
+    rm -f "$STATE_DIR/window.$DEV"
+}
+
+menu() {
+    # Choose the device once. With several loggers, ask.
+    set -- $(running_devs)
+    case $# in
+        0) die "no logger is running (is the adapter plugged in?)" ;;
+        1) DEV=$1 ;;
+        *) echo "loggers running: $*"
+           printf "which one? "
+           read -r DEV
+           ;;
+    esac
+
+    # Ctrl-C while following must stop the follow, not the menu. A trap
+    # with a handler (not an ignore) does that: the child gets the default
+    # action and dies, the menu runs the no-op handler and carries on.
+    trap ':' INT
+
+    while :; do
+        f=$(current_file "$DEV")
+        echo
+        if [ -n "$f" ]; then
+            echo "== $DEV: writing $(basename "$f") ($(human "$(size_of "$f")"))"
+        else
+            echo "== $DEV: not writing a capture"
+        fi
+        [ -f "$STATE_DIR/window.$DEV" ] && echo "   (a window is open)"
+        cat <<'EOF'
+  1) status                     5) follow live
+  2) list captures              6) follow, matching lines only
+  3) new file                   7) window: start here
+  4) new file, label the old    8) window: end here, save the slice
+  9) slice a file by byte offsets
+  q) quit
+EOF
+        printf "> "
+        read -r choice || break
+        case $choice in
+            1) (cmd_status) ;;
+            2) (cmd_list "$DEV") ;;
+            3) (cmd_new "$DEV") ;;
+            4) printf "label for the file being closed: "
+               read -r l
+               (cmd_label "$l" "$DEV") ;;
+            5) (cmd_follow "$DEV") ;;
+            6) printf "show lines containing (exact text, case-sensitive): "
+               read -r p
+               (cmd_grep "$p" "$DEV") ;;
+            7) window_start ;;
+            8) window_end ;;
+            9) printf "file (name in %s): " "$LOGDIR"
+               read -r sf
+               printf "start byte: "
+               read -r ss
+               printf "end byte: "
+               read -r se
+               (cmd_slice "$sf" "$ss" "$se") ;;
+            q|Q) break ;;
+            '') ;;
+            *) echo "?" ;;
+        esac
+    done
+}
+
+# Each subcommand runs in a subshell from the menu, so its die() ends that
+# one command and returns to the menu instead of quitting.
+
+case ${1:-} in
+    '')       menu ;;
+    status)   cmd_status ;;
+    list)     shift; cmd_list "${1:-}" ;;
+    new)      shift; cmd_new "${1:-}" ;;
+    label)    shift; cmd_label "$@" ;;
+    follow)   shift; cmd_follow "${1:-}" ;;
+    grep)     shift; cmd_grep "$@" ;;
+    pos)      shift; cmd_pos "${1:-}" ;;
+    slice)    shift; cmd_slice "$@" ;;
+    -h|--help|help)
+              sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *)        die "unknown command: $1 (capctl help)" ;;
+esac
